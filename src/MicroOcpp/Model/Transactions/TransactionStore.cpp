@@ -22,6 +22,7 @@ ConnectorTransactionStore::~ConnectorTransactionStore() {
 
 }
 
+
 std::shared_ptr<Transaction> ConnectorTransactionStore::getTransaction(unsigned int txNr) {
 
     //check for most recent element of cache first because of temporal locality
@@ -96,6 +97,38 @@ std::shared_ptr<Transaction> ConnectorTransactionStore::getTransaction(unsigned 
 
     transactions.push_back(transaction);
     return transaction;
+}
+
+
+std::shared_ptr<Transaction> ConnectorTransactionStore::getActiveTransaction() {
+
+    //check for most recent element of cache first because of temporal locality
+    if (!transactions.empty()) {
+        if (auto cached = transactions.back().lock()) {
+            if (cached->isActive()) {
+                //cache hit
+                return cached;
+            }
+        }
+    }
+
+    //check all other elements (and free up unused entries)
+    auto cached = transactions.begin();
+    while (cached != transactions.end()) {
+        if (auto tx = cached->lock()) {
+            if (tx->isActive()) {
+                //cache hit
+                return tx;
+            }
+            cached++;
+        } else {
+            //collect outdated cache reference
+            cached = transactions.erase(cached);
+        }
+    }
+
+    //no active transaction found
+    return nullptr;
 }
 
 std::shared_ptr<Transaction> ConnectorTransactionStore::createTransaction(unsigned int txNr, bool silent) {
@@ -204,6 +237,14 @@ std::shared_ptr<Transaction> TransactionStore::getTransaction(unsigned int conne
         return nullptr;
     }
     return connectors[connectorId]->getTransaction(txNr);
+}
+
+std::shared_ptr<Transaction> TransactionStore::getActiveTransaction(unsigned int connectorId) {
+    if (connectorId >= connectors.size()) {
+        MO_DBG_ERR("Invalid connectorId");
+        return nullptr;
+    }
+    return connectors[connectorId]->getActiveTransaction();
 }
 
 std::shared_ptr<Transaction> TransactionStore::createTransaction(unsigned int connectorId, unsigned int txNr, bool silent) {

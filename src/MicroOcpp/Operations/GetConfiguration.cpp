@@ -40,9 +40,6 @@ std::unique_ptr<JsonDoc> GetConfiguration::createConf(){
                     MO_DBG_ERR("invalid config");
                     continue;
                 }
-                if (!container->getConfiguration(i)->isReadable()) {
-                    continue;
-                }
                 configurations.push_back(container->getConfiguration(i));
             }
         }
@@ -56,7 +53,7 @@ std::unique_ptr<JsonDoc> GetConfiguration::createConf(){
                 }
             }
 
-            if (res && res->isReadable()) {
+            if (res) {
                 configurations.push_back(res);
             } else {
                 unknownKeys.push_back(key.c_str());

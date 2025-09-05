@@ -13,7 +13,6 @@ using namespace MicroOcpp;
 
 HeartbeatService::HeartbeatService(Context& context) : MemoryManaged("v16.Heartbeat.HeartbeatService"), context(context) {
     heartbeatIntervalInt = declareConfiguration<int>("HeartbeatInterval", 86400);
-    registerConfigurationValidator("HeartbeatInterval", VALIDATE_UNSIGNED_INT);
     lastHeartbeat = mocpp_tick_ms();
 
     //Register message handler for TriggerMessage operation
@@ -30,8 +29,6 @@ void HeartbeatService::loop() {
         lastHeartbeat = now;
 
         auto heartbeat = makeRequest(new Ocpp16::Heartbeat(context.getModel()));
-        // Heartbeats can not deviate more than 4s from the configured interval
-        heartbeat->setTimeout(std::min(4000UL, hbInterval));
         context.initiateRequest(std::move(heartbeat));
     }
 }

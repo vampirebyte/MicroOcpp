@@ -8,7 +8,7 @@
 #include <ArduinoJson.h>
 #include <memory>
 
-#define MO_CONFIG_MAX_VALSTRSIZE 128
+#define MO_CONFIG_MAX_VALSTRSIZE 2048  // Increased from 128 to 2048 to support SSL certificates
 
 #ifndef MO_CONFIG_EXT_PREFIX
 #define MO_CONFIG_EXT_PREFIX "Cst_"
@@ -36,15 +36,7 @@ protected:
     revision_t value_revision = 0; //write access counter; used to check if this config has been changed
 private:
     bool rebootRequired = false;
-
-    enum class Mutability : uint8_t {
-        ReadWrite,
-        ReadOnly,
-        WriteOnly,
-        None
-    };
-    Mutability mutability = Mutability::ReadWrite;
-
+    bool readOnly = false;
 public:
     virtual ~Configuration();
 
@@ -68,9 +60,6 @@ public:
 
     void setReadOnly();
     bool isReadOnly();
-    bool isReadable();
-
-    void setWriteOnly();
 };
 
 /*

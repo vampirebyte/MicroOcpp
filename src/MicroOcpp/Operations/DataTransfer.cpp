@@ -8,7 +8,8 @@
 using MicroOcpp::Ocpp16::DataTransfer;
 using MicroOcpp::JsonDoc;
 
-DataTransfer::DataTransfer() : MemoryManaged("v16.Operation.", "DataTransfer") {
+DataTransfer::
+DataTransfer() : MemoryManaged("v16.Operation.", "DataTransfer") {
 
 }
 
@@ -39,12 +40,12 @@ void DataTransfer::processConf(JsonObject payload){
 }
 
 void DataTransfer::processReq(JsonObject payload) {
-    // Do nothing - we're just required to reject these DataTransfer requests
+    // Do nothing - we're just required to accept these DataTransfer requests
 }
 
 std::unique_ptr<JsonDoc> DataTransfer::createConf(){
     auto doc = makeJsonDoc(getMemoryTag(), JSON_OBJECT_SIZE(1));
     JsonObject payload = doc->to<JsonObject>();
-    payload["status"] = "Rejected";
+    payload["status"] = "Accepted";
     return doc;
 }

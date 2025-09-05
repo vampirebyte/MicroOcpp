@@ -9,7 +9,7 @@
 #include <MicroOcpp/Core/Memory.h>
 #include <MicroOcpp/Debug.h>
 
-#define MAX_CONFIGURATIONS 50
+#define MAX_CONFIGURATIONS 500
 
 namespace MicroOcpp {
 
@@ -60,161 +60,191 @@ public:
     
     bool load() override {
 
+        /* ---------------------------------------------------------------
+        * 0.  Fast‑exit if this container was already initialised
+        * ------------------------------------------------------------ */
         if (loaded) {
+            MO_DBG_VERBOSE("[CFG] load(): container already loaded – skip");
             return true;
         }
 
         if (!filesystem) {
+            MO_DBG_ERR("[CFG] load(): filesystem adapter is nullptr");
             return false;
         }
 
+        MO_DBG_VERBOSE("[CFG] load(): start, file=\"%s\"", getFilename());
+
+        /* ---------------------------------------------------------------
+        * 1.  Check if the file exists – create an empty skeleton on the
+        *     very first boot so that save() has something to overwrite.
+        * ------------------------------------------------------------ */
         size_t file_size = 0;
-        if (filesystem->stat(getFilename(), &file_size) != 0 // file does not exist
-                || file_size == 0) {                         // file exists, but empty
-            MO_DBG_DEBUG("Populate FS: create configuration file");
+        if (filesystem->stat(getFilename(), &file_size) != 0 || file_size == 0) {
+            MO_DBG_VERBOSE("[CFG] load(): file missing or empty (size=%zu) – "
+                        "calling save() to create skeleton", file_size);
             return save();
         }
 
+        MO_DBG_VERBOSE("[CFG] load(): file found, size=%zu – reading JSON", file_size);
+
+        /* ---------------------------------------------------------------
+        * 2.  Parse JSON document
+        * ------------------------------------------------------------ */
         auto doc = FilesystemUtils::loadJson(filesystem, getFilename(), getMemoryTag());
         if (!doc) {
-            MO_DBG_ERR("failed to load %s", getFilename());
+            MO_DBG_ERR("[CFG] load(): JSON parsing failed");
             return false;
         }
+        MO_DBG_VERBOSE("[CFG] load(): JSON parsed");
 
-        JsonObject root = doc->as<JsonObject>();
-
+        JsonObject root         = doc->as<JsonObject>();
         JsonObject configHeader = root["head"];
 
-        if (strcmp(configHeader["content-type"] | "Invalid", "ocpp_config_file") &&
-                strcmp(configHeader["content-type"] | "Invalid", "ao_configuration_file")) { //backwards-compatibility
-            MO_DBG_ERR("Unable to initialize: unrecognized configuration file format");
+        /* ---------------------------------------------------------------
+        * 3.  Header validation
+        * ------------------------------------------------------------ */
+        const char *ctype = configHeader["content-type"] | "Invalid";
+        const char *vers  = configHeader["version"]      | "Invalid";
+        MO_DBG_VERBOSE("[CFG] load(): header content‑type=\"%s\", version=\"%s\"",
+                    ctype, vers);
+
+        if (strcmp(ctype, "ocpp_config_file") &&
+            strcmp(ctype, "ao_configuration_file")) {
+            MO_DBG_ERR("[CFG] load(): unknown file format");
+            return false;
+        }
+        if (strcmp(vers, "2.0") && strcmp(vers, "1.1")) {
+            MO_DBG_ERR("[CFG] load(): unsupported version \"%s\"", vers);
             return false;
         }
 
-        if (strcmp(configHeader["version"] | "Invalid", "2.0") &&
-                strcmp(configHeader["version"] | "Invalid", "1.1")) { //backwards-compatibility
-            MO_DBG_ERR("Unable to initialize: unsupported version");
-            return false;
-        }
-        
+        /* ---------------------------------------------------------------
+        * 4.  Iterate through stored configurations
+        * ------------------------------------------------------------ */
         JsonArray configurationsArray = root["configurations"];
+        MO_DBG_VERBOSE("[CFG] load(): %zu configuration entries",
+                    configurationsArray.size());
+
         if (configurationsArray.size() > MAX_CONFIGURATIONS) {
-            MO_DBG_ERR("Unable to initialize: configurations_len is too big (=%zu)", configurationsArray.size());
+            MO_DBG_ERR("[CFG] load(): entry count exceeds limit (%u)",
+                    MAX_CONFIGURATIONS);
             return false;
         }
 
         for (JsonObject stored : configurationsArray) {
-            TConfig type;
-            if (!deserializeTConfig(stored["type"] | "_Undefined", type)) {
-                MO_DBG_ERR("corrupt config");
-                continue;
-            }
 
+            /* ---------- Extract key ---------------------------------- */
             const char *key = stored["key"] | "";
             if (!*key) {
-                MO_DBG_ERR("corrupt config");
+                MO_DBG_ERR("[CFG] load(): entry without key – skipped");
                 continue;
             }
+            MO_DBG_VERBOSE("[CFG] load(): processing key \"%s\"", key);
 
-            if (!stored.containsKey("value")) {
-                MO_DBG_ERR("corrupt config");
-                continue;
+            /* ---------- Determine type (explicit field or inference) -- */
+            TConfig type{};
+            bool    has_explicit = stored.containsKey("type");
+            bool    ok_type      = has_explicit &&
+                                deserializeTConfig(stored["type"], type);
+
+            if (!ok_type) {
+                /* Fallback to inference */
+                if (stored["value"].is<int>())         type = TConfig::Int;
+                else if (stored["value"].is<bool>())   type = TConfig::Bool;
+                else                                   type = TConfig::String;
+                MO_DBG_VERBOSE("[CFG] load(): inferred type for \"%s\" → %s",
+                            key,
+                            type == TConfig::Int    ? "Int"    :
+                            type == TConfig::Bool   ? "Bool"   :
+                                                        "String");
+            } else {
+                MO_DBG_VERBOSE("[CFG] load(): explicit type for \"%s\" → %s",
+                            key, stored["type"].as<const char*>());
             }
 
+            /* ---------- Look for existing Configuration -------------- */
+            auto  cfg = getConfiguration(key).get();
+            if (cfg && cfg->getType() != type) {
+                MO_DBG_ERR("[CFG] load(): type mismatch for \"%s\" – recreating",
+                        key);
+                remove(cfg);
+                cfg = nullptr;
+            }
+
+            /* ---------- Create one on‑the‑fly if necessary ----------- */
             char *key_pooled = nullptr;
-
-            auto config = getConfiguration(key).get();
-            if (config && config->getType() != type) {
-                MO_DBG_ERR("conflicting type for %s - remove old config", key);
-                remove(config);
-                config = nullptr;
-            }
-            if (!config) {
-                #if MO_ENABLE_HEAP_PROFILER
-                char memoryTag [64];
-                snprintf(memoryTag, sizeof(memoryTag), "%s%s", "v16.Configuration.", key);
-                #else
+            if (!cfg) {
+            #if MO_ENABLE_HEAP_PROFILER
+                char memoryTag[64];
+                snprintf(memoryTag, sizeof(memoryTag), "%s%s",
+                        "v16.Configuration.", key);
+            #else
                 const char *memoryTag = nullptr;
-                (void)memoryTag;
-                #endif
-                key_pooled = static_cast<char*>(MO_MALLOC(memoryTag, strlen(key) + 1));
+            #endif
+                key_pooled = static_cast<char *>(MO_MALLOC(memoryTag,
+                                                            strlen(key) + 1));
                 if (!key_pooled) {
-                    MO_DBG_ERR("OOM: %s", key);
-                    return false;
+                    MO_DBG_ERR("[CFG] load(): OOM while duplicating key \"%s\"", key);
+                    continue;
                 }
                 strcpy(key_pooled, key);
-            }
-
-            switch (type) {
-                case TConfig::Int: {
-                    if (!stored["value"].is<int>()) {
-                        MO_DBG_ERR("corrupt config");
-                        MO_FREE(key_pooled);
-                        continue;
-                    }
-                    int value = stored["value"] | 0;
-                    if (!config) {
-                        //create new config
-                        config = createConfiguration(TConfig::Int, key_pooled).get();
-                    }
-                    if (config) {
-                        config->setInt(value);
-                    }
-                    break;
+                cfg = createConfiguration(type, key_pooled).get();
+                if (!cfg) {
+                    MO_DBG_ERR("[CFG] load(): OOM while creating Configuration "
+                            "object for \"%s\"", key);
+                    MO_FREE(key_pooled);
+                    continue;
                 }
-                case TConfig::Bool: {
-                    if (!stored["value"].is<bool>()) {
-                        MO_DBG_ERR("corrupt config");
-                        MO_FREE(key_pooled);
-                        continue;
-                    }
-                    bool value = stored["value"] | false;
-                    if (!config) {
-                        //create new config
-                        config = createConfiguration(TConfig::Bool, key_pooled).get();
-                    }
-                    if (config) {
-                        config->setBool(value);
-                    }
-                    break;
-                }
-                case TConfig::String: {
-                    if (!stored["value"].is<const char*>()) {
-                        MO_DBG_ERR("corrupt config");
-                        MO_FREE(key_pooled);
-                        continue;
-                    }
-                    const char *value = stored["value"] | "";
-                    if (!config) {
-                        //create new config
-                        config = createConfiguration(TConfig::String, key_pooled).get();
-                    }
-                    if (config) {
-                        config->setString(value);
-                    }
-                    break;
-                }
-            }
-
-            if (config) {
-                //success
-
-                if (key_pooled) {
-                    //allocated key, need to store
-                    keyPool.push_back(std::move(key_pooled));
-                }
+                MO_DBG_VERBOSE("[CFG] load(): created new Configuration for \"%s\"",
+                            key);
             } else {
-                MO_DBG_ERR("OOM: %s", key);
-                MO_FREE(key_pooled);
+                MO_DBG_VERBOSE("[CFG] load(): found existing Configuration for \"%s\"",
+                            key);
             }
-        }
 
+            /* ---------- Apply the stored value ----------------------- */
+            if (!stored.containsKey("value")) {
+                MO_DBG_ERR("[CFG] load(): \"%s\" has no value – skipped", key);
+                continue;
+            }
+
+            bool value_ok = true;
+            switch (type) {
+                case TConfig::Int:
+                    if (stored["value"].is<int>()) cfg->setInt(stored["value"]);
+                    else value_ok = false;
+                    break;
+                case TConfig::Bool:
+                    if (stored["value"].is<bool>()) cfg->setBool(stored["value"]);
+                    else value_ok = false;
+                    break;
+                case TConfig::String:
+                    if (stored["value"].is<const char*>())
+                        cfg->setString(stored["value"]);
+                    else value_ok = false;
+                    break;
+            }
+            MO_DBG_VERBOSE("[CFG] load(): value %s for \"%s\"",
+                        value_ok ? "applied" : "rejected (type mismatch)", key);
+
+            if (key_pooled) {
+                keyPool.push_back(std::move(key_pooled));
+            }
+        } // for each entry
+
+        /* ---------------------------------------------------------------
+        * 5.  Finalise
+        * ------------------------------------------------------------ */
         configurationsUpdated();
-
-        MO_DBG_DEBUG("Initialization finished");
         loaded = true;
+
+        MO_DBG_DEBUG("[CFG] load(): finished OK – %zu configs in RAM",
+                    configurations.size());
         return true;
     }
+
+
 
     bool save() override {
 

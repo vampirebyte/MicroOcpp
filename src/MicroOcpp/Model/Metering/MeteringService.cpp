@@ -17,9 +17,9 @@ MeteringService::MeteringService(Context& context, int numConn, std::shared_ptr<
       : MemoryManaged("v16.Metering.MeteringService"), context(context), meterStore(filesystem), connectors(makeVector<std::unique_ptr<MeteringConnector>>(getMemoryTag())) {
 
     //set factory defaults for Metering-related config keys
-    declareConfiguration<const char*>("MeterValuesSampledData", "Energy.Active.Import.Register,Power.Active.Import");
+    declareConfiguration<const char*>("MeterValuesSampledData", "Energy.Active.Import.Register,Power.Active.Import,Current.Import,Voltage");
     declareConfiguration<const char*>("StopTxnSampledData", "");
-    declareConfiguration<const char*>("MeterValuesAlignedData", "Energy.Active.Import.Register,Power.Active.Import");
+    declareConfiguration<const char*>("MeterValuesAlignedData", "Energy.Active.Import.Register,Power.Active.Import,Current.Import,Voltage");
     declareConfiguration<const char*>("StopTxnAlignedData", "");
     
     connectors.reserve(numConn);
@@ -57,12 +57,22 @@ MeteringService::MeteringService(Context& context, int numConn, std::shared_ptr<
         return isValid;
     };
 
+    std::function<bool(const char*)> validateUnsignedIntString = [] (const char *value) {
+        for(size_t i = 0; value[i] != '\0'; i++)
+        {
+            if (value[i] < '0' || value[i] > '9') {
+                return false;
+            }
+        }
+        return true;
+    };
+
     registerConfigurationValidator("MeterValuesSampledData", validateSelectString);
     registerConfigurationValidator("StopTxnSampledData", validateSelectString);
     registerConfigurationValidator("MeterValuesAlignedData", validateSelectString);
     registerConfigurationValidator("StopTxnAlignedData", validateSelectString);
-    registerConfigurationValidator("MeterValueSampleInterval", VALIDATE_UNSIGNED_INT);
-    registerConfigurationValidator("ClockAlignedDataInterval", VALIDATE_UNSIGNED_INT);
+    registerConfigurationValidator("MeterValueSampleInterval", validateUnsignedIntString);
+    registerConfigurationValidator("ClockAlignedDataInterval", validateUnsignedIntString);
 
     /*
      * Register further message handlers to support echo mode: when this library

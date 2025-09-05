@@ -42,6 +42,15 @@ public:
     static int32_t toInteger(float& val) {return (int32_t) val;}
 };
 
+template <>
+class SampledValueDeSerializer<String> { // Used in SignedData
+public:
+    static String deserialize(const char *str) { return String(str); }
+    static bool ready(String& val) { return val.length() > 0; }
+    static String serialize(String& val) { return val; }
+    static int32_t toInteger(String& val) { (void)val; return 0; }
+};
+
 class SampledValueProperties {
 private:
     String format;

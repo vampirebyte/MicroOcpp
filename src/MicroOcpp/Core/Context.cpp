@@ -58,6 +58,11 @@ void Context::setFtpClient(std::unique_ptr<FtpClient> ftpClient) {
     this->ftpClient = std::move(ftpClient);
 }
 
+
+long Context::getLastMessageReceived(){
+    return connection.getLastRecv();
+}
+
 FtpClient *Context::getFtpClient() {
     return ftpClient.get();
 }

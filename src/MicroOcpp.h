@@ -16,11 +16,13 @@
 #include <MicroOcpp/Core/Memory.h>
 #include <MicroOcpp/Model/Metering/SampledValue.h>
 #include <MicroOcpp/Model/Transactions/Transaction.h>
+#include <MicroOcpp/Model/ConnectorBase/Notification.h>
 #include <MicroOcpp/Model/ConnectorBase/ChargePointErrorData.h>
 #include <MicroOcpp/Model/ConnectorBase/ChargePointStatus.h>
 #include <MicroOcpp/Model/ConnectorBase/UnlockConnectorResult.h>
 #include <MicroOcpp/Version.h>
 #include <MicroOcpp/Model/Certificates/Certificate.h>
+#include <MicroOcpp/Model/Diagnostics/DiagnosticsService.h>
 
 using MicroOcpp::OnReceiveConfListener;
 using MicroOcpp::OnReceiveReqListener;
@@ -111,7 +113,9 @@ void mocpp_initialize(
             std::shared_ptr<MicroOcpp::FilesystemAdapter> filesystem =
                 MicroOcpp::makeDefaultFilesystemAdapter(MicroOcpp::FilesystemOpt::Use_Mount_FormatOnFail), //If this library should format the flash if necessary. Find further options in ConfigurationOptions.h
             bool autoRecover = false, //automatically sanitize the local data store when the lib detects recurring crashes. Not recommended during development
-            MicroOcpp::ProtocolVersion version = MicroOcpp::ProtocolVersion(1,6));
+            MicroOcpp::ProtocolVersion version = MicroOcpp::ProtocolVersion(1,6),
+            int noOfConnectors = 2
+        );
 
 /*
  * Stop the OCPP library and release allocated resources.
@@ -124,9 +128,42 @@ void mocpp_deinitialize();
 void mocpp_loop();
 
 /*
+ * Custom
+ */
+
+void initialize_files_system(std::shared_ptr<MicroOcpp::FilesystemAdapter> fs);
+
+void mo_configuration_load();
+
+bool mocpp_initialized();
+
+bool is_system_time_valid();
+void get_system_time(char *timestamp);
+
+int get_transaction_id(int connectorId);
+
+bool is_in_session(int connectorId);
+
+void setOnDiagnosticsUpload(std::function<bool(const char *location, MicroOcpp::Timestamp &startTime, MicroOcpp::Timestamp &stopTime)> onUpload); 
+
+void setOnUploadStatusInput(std::function<MicroOcpp::UploadStatus()> uploadStatusInput);
+
+long getLastMessageReceived();
+
+void moDeclareStringConfiguration(const char *keyName);
+void moDeclareIntConfiguration(const char *keyName);
+void moDeclareBoolConfiguration(const char *keyName);
+const char *getOCPPStringConfigurationValue(const char *keyName);
+const int getOCPPIntConfigurationValue(const char *keyName);
+const bool getOCPPBoolConfigurationValue(const char *keyName);
+void setOCPPStringConfigurationValue(const char *keyName, const char *value);
+void setOCPPIntConfigurationValue(const char *keyName, int value);
+void setOCPPBoolConfigurationValue(const char *keyName, bool value);
+
+
+/*
  * Transaction management.
  * 
- * OCPP 1.6 (2.0.1 see below):
  * Begin the transaction process and prepare it. When all conditions for the transaction are true,
  * eventually send a StartTransaction request to the OCPP server.
  * Conditions:
@@ -140,24 +177,18 @@ void mocpp_loop();
  * 
  * See beginTransaction_authorized for skipping steps 1) to 3)
  * 
- * Returns true if it was possible to create the transaction process. Returns
- * false if either another transaction process is still active or you need to try it again later.
- * 
- * OCPP 2.0.1:
- * Authorize a transaction. Like the OCPP 1.6 behavior, this should be called when the user swipes the
- * card to start charging, but the semantic is slightly different. This function begins the authorized
- * phase, but a transaction may already have started due to an earlier transaction start point.
+ * Returns the transaction object if it was possible to create the transaction process. Returns
+ * nullptr if either another transaction process is still active or you need to try it again later.
  */
-bool beginTransaction(const char *idTag, unsigned int connectorId = 1);
+std::shared_ptr<MicroOcpp::Transaction> beginTransaction(const char *idTag, unsigned int connectorId = 1);
 
 /*
  * Begin the transaction process and skip the OCPP-side authorization. See beginTransaction(...) for a
  * complete description
  */
-bool beginTransaction_authorized(const char *idTag, const char *parentIdTag = nullptr, unsigned int connectorId = 1);
+std::shared_ptr<MicroOcpp::Transaction> beginTransaction_authorized(const char *idTag, const char *parentIdTag = nullptr, unsigned int connectorId = 1);
 
 /*
- * OCPP 1.6 (2.0.1 see below):
  * End the transaction process if idTag is authorized to stop the transaction. The OCPP lib sends
  * a StopTransaction request if the following conditions are true:
  * Conditions:
@@ -187,15 +218,6 @@ bool beginTransaction_authorized(const char *idTag, const char *parentIdTag = nu
  *     `endTransaction_authorized(nullptr, reason);`
  * 
  * Returns true if there is a transaction which could eventually be ended by this action
- * 
- * OCPP 2.0.1:
- * End the user authorization. Like when running with OCPP 1.6, this should be called when the user
- * swipes the card to stop charging. The difference between the 1.6/2.0.1 behavior is that in 1.6,
- * endTransaction always sets the transaction inactive so that it wants to stop. In 2.0.1, this only
- * revokes the user authorization which may terminate the transaction but doesn't have to if the
- * transaction stop point is set to EvConnected.
- * 
- * Note: the stop reason parameter is ignored when running with OCPP 2.0.1. It's always Local
  */
 bool endTransaction(const char *idTag = nullptr, const char *reason = nullptr, unsigned int connectorId = 1);
 
@@ -252,14 +274,6 @@ const char *getTransactionIdTag(unsigned int connectorId = 1);
  * }
  */
 std::shared_ptr<MicroOcpp::Transaction>& getTransaction(unsigned int connectorId = 1);
-
-#if MO_ENABLE_V201
-/*
- * OCPP 2.0.1 version of getTransaction(). Note that the return transaction object is of another type
- * and unlike the 1.6 version, this function does not give ownership.
- */
-MicroOcpp::Ocpp201::Transaction *getTransactionV201(unsigned int evseId = 1);
-#endif //MO_ENABLE_V201
 
 /* 
  * Returns if the OCPP library allows the EVSE to charge at the moment.
@@ -331,11 +345,10 @@ void setStartTxReadyInput(std::function<bool()> startTxReady, unsigned int conne
 
 void setStopTxReadyInput(std::function<bool()> stopTxReady, unsigned int connectorId = 1); //Input if charger is ready for StopTransaction
 
-void setTxNotificationOutput(std::function<void(MicroOcpp::Transaction*,TxNotification)> notificationOutput, unsigned int connectorId = 1); //called when transaction state changes (see TxNotification for possible events). Transaction can be null
+void setTxNotificationOutput(std::function<void(MicroOcpp::Transaction*,MicroOcpp::TxNotification)> notificationOutput, unsigned int connectorId = 1); //called when transaction state changes (see TxNotification for possible events). Transaction can be null
 
-#if MO_ENABLE_V201
-void setTxNotificationOutputV201(std::function<void(MicroOcpp::Ocpp201::Transaction*,TxNotification)> notificationOutput, unsigned int connectorId = 1);
-#endif //MO_ENABLE_V201
+void setAvailability(bool available, unsigned int connectorId);
+void setAvailabilityVolatile(bool available, unsigned int connectorId);
 
 #if MO_ENABLE_CONNECTOR_LOCK
 /*
@@ -456,6 +469,8 @@ void setOnReceiveRequest(const char *operationType, OnReceiveReqListener onRecei
  * 
  */
 void setOnSendConf(const char *operationType, OnSendConfListener onSendConf);
+// New: global listener for confirmations received from CSMS for client-initiated operations
+void setOnReceiveConf(const char *operationType, OnReceiveConfListener onReceiveConf);
 
 /*
  * Create and send an operation without using the built-in Operation class. This function bypasses
@@ -579,5 +594,31 @@ bool stopTransaction(
             OnTimeoutListener onTimeout = nullptr,
             OnReceiveErrorListener onError = nullptr,
             unsigned int timeout = 0);
+
+/*
+ * Print all configuration keys and values from all accessible configuration containers to Serial.
+ * This function iterates through all configuration containers and prints each key-value pair.
+ * Useful for debugging and monitoring the current configuration state.
+ * 
+ * On Arduino platforms, output goes to Serial. On other platforms, output goes to MO_DBG_INFO.
+ * 
+ * Example usage:
+ *   // After OCPP initialization
+ *   printAllConfigurations();
+ * 
+ * Output format:
+ *   === All Configuration Keys and Values ===
+ *   
+ *   --- Container: /mo-ocpp-config.jsn ---
+ *   Number of configurations: 5
+ *     HeartbeatInterval = 86400 (int)
+ *     MeterValueSampleInterval = 60 (int) [READ-ONLY]
+ *     WebSocketPingInterval = 54 (int) [REBOOT-REQUIRED]
+ *     AuthorizeRemoteTxRequests = true (bool)
+ *     ChargePointModel = "Demo Charger" (string)
+ *   
+ *   === Total: 5 configurations in 1 containers ===
+ */
+void printAllConfigurations();
 
 #endif

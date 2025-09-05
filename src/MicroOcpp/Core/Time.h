@@ -106,6 +106,8 @@ private:
 
     Timestamp currentTime = Timestamp();
 
+    bool timeIsSet = false;
+
 public:
 
     Clock();
@@ -136,6 +138,8 @@ public:
      * run of this library. The caller must check this
      */
     Timestamp adjustPrebootTimestamp(const Timestamp& t);
+
+    bool isValid() {return timeIsSet;}
 };
 
 }

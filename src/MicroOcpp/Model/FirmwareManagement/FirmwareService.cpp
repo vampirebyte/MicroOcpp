@@ -1,6 +1,6 @@
 // matth-x/MicroOcpp
-// Copyright Matthias Akstaller 2019 - 2024
-// MIT License
+// Copyright Matthias Akstaller 2019‑2024
+// MIT License
 
 #include <MicroOcpp/Model/FirmwareManagement/FirmwareService.h>
 #include <MicroOcpp/Core/Context.h>
@@ -17,486 +17,493 @@
 #include <MicroOcpp/Platform.h>
 #include <MicroOcpp/Debug.h>
 
-//debug option: update immediately and don't wait for the retreive date
+#include <Update.h>   // always required
+
+#if MO_PLATFORM == MO_PLATFORM_ARDUINO && defined(ESP32)
+  #include <HTTPUpdate.h>
+  #include <HTTPClient.h>
+  #include <WiFiClientSecure.h>
+#elif MO_PLATFORM == MO_PLATFORM_ARDUINO && defined(ESP8266)
+  #include <ESP8266httpUpdate.h>
+  #include <ESP8266HTTPClient.h>
+  #include <ESP8266WiFi.h>
+#endif
+
 #ifndef MO_IGNORE_FW_RETR_DATE
 #define MO_IGNORE_FW_RETR_DATE 0
 #endif
 
 using MicroOcpp::FirmwareService;
 using MicroOcpp::Ocpp16::FirmwareStatus;
-using MicroOcpp::Request;
 
-FirmwareService::FirmwareService(Context& context) : MemoryManaged("v16.Firmware.FirmwareService"), context(context), buildNumber(makeString(getMemoryTag())), location(makeString(getMemoryTag())) {
+/* ====================================================================== */
+/*  helper: delay reboot so “Installed” is transmitted first              */
+/* ====================================================================== */
+void FirmwareService::scheduleDelayedRestart(unsigned long ms)
+{
+    restartScheduled   = true;
+    restartScheduledAt = mocpp_tick_ms() + ms;
+}
+
+/* ====================================================================== */
+/*  constructor                                                           */
+/* ====================================================================== */
+FirmwareService::FirmwareService(Context& ctx)
+    : MemoryManaged("v16.Firmware.FirmwareService"),
+      context(ctx),
+      buildNumber(makeString(getMemoryTag())),
+      location(makeString(getMemoryTag()))
+{
+    context.getOperationRegistry().registerOperation(
+        "UpdateFirmware",
+        [this]() { return new Ocpp16::UpdateFirmware(*this); });
+
+    context.getOperationRegistry().registerOperation(
+        "FirmwareStatusNotification",
+        [this]() { return new Ocpp16::FirmwareStatusNotification(getFirmwareStatus()); });
+}
+
+/* ====================================================================== */
+/*  public API                                                            */
+/* ====================================================================== */
+void FirmwareService::setBuildNumber(const char* bn)
+{
+    if (!bn) return;
+    buildNumber = bn;
+    previousBuildNumberString = declareConfiguration<const char*>("BUILD_NUMBER",
+                                                                  buildNumber.c_str(),
+                                                                  MO_KEYVALUE_FN,
+                                                                  false, false, false);
+    checkedSuccessfulFwUpdate = false;
+}
+
+/* ---------------------------------------------------------------------- */
+void FirmwareService::loop()
+{
+    auto& now = context.getModel().getClock().now();
     
-    context.getOperationRegistry().registerOperation("UpdateFirmware", [this] () {
-        return new Ocpp16::UpdateFirmware(*this);});
-
-    //Register message handler for TriggerMessage operation
-    context.getOperationRegistry().registerOperation("FirmwareStatusNotification", [this] () {
-        return new Ocpp16::FirmwareStatusNotification(getFirmwareStatus());});
-}
-
-void FirmwareService::setBuildNumber(const char *buildNumber) {
-    if (buildNumber == nullptr)
-        return;
-    this->buildNumber = buildNumber;
-    previousBuildNumberString = declareConfiguration<const char*>("BUILD_NUMBER", this->buildNumber.c_str(), MO_KEYVALUE_FN, false, false, false);
-    checkedSuccessfulFwUpdate = false; //--> CS will be notified
-}
-
-void FirmwareService::loop() {
-
-    if (ftpDownload && ftpDownload->isActive()) {
-        ftpDownload->loop();
+    /* ------------------------------------------------- FTP chunk handler */
+    if (ftpDownload && ftpDownload->isActive()) ftpDownload->loop();
+    if (ftpDownload && !ftpDownload->isActive()) {
+        MO_DBG_DEBUG("Deinit FTP download");
+        ftpDownload.reset();
     }
 
-    if (ftpDownload) {
-        if (ftpDownload->isActive()) {
-            ftpDownload->loop();
+    /* ----------------------------- auto push FirmwareStatusNotification */
+    if (auto n = getFirmwareStatusNotification()) context.initiateRequest(std::move(n));
+
+    /* --------------------------------------------- honour transition delay */
+    if (mocpp_tick_ms() - timestampTransition < delayTransition) goto rebootCheck;
+
+    /* ------------------------------------------------ main state machine */
+    if (retries == 0 || now < retreiveDate) goto rebootCheck;
+
+    switch (stage) {
+
+    case UpdateStage::Idle:
+        MO_DBG_INFO("FW‑Update: start");
+        if (context.getModel().getNumConnectors() > 0)
+            context.getModel().getConnector(0)->setAvailabilityVolatile(false);
+
+        if (!onDownload) {
+            stage = UpdateStage::AfterDownload;
         } else {
-            MO_DBG_DEBUG("Deinit FTP download");
-            ftpDownload.reset();
+            downloadIssued      = true;
+            stage               = UpdateStage::AwaitDownload;
+            timestampTransition = mocpp_tick_ms();
+            delayTransition     = 2000;
         }
+        break;
+
+    case UpdateStage::AwaitDownload:
+        MO_DBG_INFO("FW‑Update: invoke onDownload");
+        stage = UpdateStage::Downloading;
+        if (onDownload) onDownload(location.c_str());
+        timestampTransition = mocpp_tick_ms();
+        delayTransition     = downloadStatusInput ? 1000 : 30000;
+        break;
+
+    case UpdateStage::Downloading:
+        if (!downloadStatusInput || downloadStatusInput() == DownloadStatus::Downloaded) {
+            stage = UpdateStage::AfterDownload;
+        } else if (downloadStatusInput() == DownloadStatus::DownloadFailed) {
+            MO_DBG_INFO("FW‑Update: download failed – retry");
+            retreiveDate = now + retryInterval;
+            --retries;
+            resetStage();
+            timestampTransition = mocpp_tick_ms();
+            delayTransition     = 10000;
+            if (context.getModel().getNumConnectors() > 0)
+                context.getModel().getConnector(0)->setAvailabilityVolatile(true);
+        }
+        break;
+
+    case UpdateStage::AfterDownload: {
+        bool txRunning = false;
+        for (unsigned int c = 0; c < context.getModel().getNumConnectors(); ++c) {
+            auto con = context.getModel().getConnector(c);
+            if (con && con->getTransaction() && con->getTransaction()->isRunning()) {
+                txRunning = true;
+                break;
+            }
+        }
+        if (txRunning) break;
+
+        installationIssued  = true;
+        stage               = UpdateStage::AwaitInstallation;
+        timestampTransition = mocpp_tick_ms();
+        delayTransition     = 2000;
+        break;
     }
 
-    auto notification = getFirmwareStatusNotification();
-    if (notification) {
-        context.initiateRequest(std::move(notification));
+    case UpdateStage::AwaitInstallation:
+        MO_DBG_INFO("FW‑Update: invoke onInstall");
+        stage = UpdateStage::Installing;
+        if (onInstall) onInstall(location.c_str());
+        timestampTransition = mocpp_tick_ms();
+        delayTransition     = installationStatusInput ? 1000 : 120000;
+        break;
+
+    case UpdateStage::Installing:
+        if (!installationStatusInput ||
+            installationStatusInput() == InstallationStatus::Installed) {
+
+            MO_DBG_INFO("FW‑Update: finished");
+            resetStage();
+            stage   = UpdateStage::Installed;
+            retries = 0;
+            location.clear();
+
+            if (context.getModel().getNumConnectors() > 0)
+                context.getModel().getConnector(0)->setAvailabilityVolatile(true);
+
+        } else if (installationStatusInput() == InstallationStatus::InstallationFailed) {
+            MO_DBG_INFO("FW‑Update: install failed – retry");
+            retreiveDate = now + retryInterval;
+            --retries;
+            resetStage();
+            timestampTransition = mocpp_tick_ms();
+            delayTransition     = 10000;
+            
+            if (context.getModel().getNumConnectors() > 0)
+                context.getModel().getConnector(0)->setAvailabilityVolatile(true);
+        }
+        break;
+
+    default: break;  // Installed / InternalError
     }
 
-    if (mocpp_tick_ms() - timestampTransition < delayTransition) {
-        return;
+rebootCheck:
+    /* ------------------------------------------------ delayed reboot (if any) */
+#if MO_PLATFORM == MO_PLATFORM_ARDUINO
+    if (restartScheduled && mocpp_tick_ms() > restartScheduledAt &&
+        lastReportedStatus == FirmwareStatus::Installed) {
+        MO_DBG_INFO("FW‑Update: rebooting now");
+        ESP.restart();
     }
-
-    auto& timestampNow = context.getModel().getClock().now();
-    if (retries > 0 && timestampNow >= retreiveDate) {
-
-        if (stage == UpdateStage::Idle) {
-            MO_DBG_INFO("Start update");
-
-            if (context.getModel().getNumConnectors() > 0) {
-                auto cp = context.getModel().getConnector(0);
-                cp->setAvailabilityVolatile(false);
-            }
-            if (onDownload == nullptr) {
-                stage = UpdateStage::AfterDownload;
-            } else {
-                downloadIssued = true;
-                stage = UpdateStage::AwaitDownload;
-                timestampTransition = mocpp_tick_ms();
-                delayTransition = 2000; //delay between state "Downloading" and actually starting the download
-                return;
-            }
-        }
-
-        if (stage == UpdateStage::AwaitDownload) {
-            MO_DBG_INFO("Start download");
-            stage = UpdateStage::Downloading;
-            if (onDownload != nullptr) {
-                onDownload(location.c_str());
-                timestampTransition = mocpp_tick_ms();
-                delayTransition = downloadStatusInput ? 1000 : 30000; //give the download at least 30s
-                return;
-            }
-        }
-
-        if (stage == UpdateStage::Downloading) {
-
-            if (downloadStatusInput) {
-                //check if client reports download to be finished
-
-                if (downloadStatusInput() == DownloadStatus::Downloaded) {
-                    //passed download stage
-                    stage = UpdateStage::AfterDownload;
-                } else if (downloadStatusInput() == DownloadStatus::DownloadFailed) {
-                    MO_DBG_INFO("Download timeout or failed");
-                    retreiveDate = timestampNow;
-                    retreiveDate += retryInterval;
-                    retries--;
-                    resetStage();
-
-                    timestampTransition = mocpp_tick_ms();
-                    delayTransition = 10000;
-                }
-                return;
-            } else {
-                //if client doesn't report download state, assume download to be finished (at least 30s download time have passed until here)
-                stage = UpdateStage::AfterDownload;
-            }
-        }
-
-        if (stage == UpdateStage::AfterDownload) {
-            bool ongoingTx = false;
-            for (unsigned int cId = 0; cId < context.getModel().getNumConnectors(); cId++) {
-                auto connector = context.getModel().getConnector(cId);
-                if (connector && connector->getTransaction() && connector->getTransaction()->isRunning()) {
-                    ongoingTx = true;
-                    break;
-                }
-            }
-
-            if (!ongoingTx) {
-                if (onInstall == nullptr) {
-                    stage = UpdateStage::Installing;
-                } else {
-                    stage = UpdateStage::AwaitInstallation;
-                }
-                timestampTransition = mocpp_tick_ms();
-                delayTransition = 2000;
-                installationIssued = true;
-            }
-
-            return;
-        }
-
-        if (stage == UpdateStage::AwaitInstallation) {
-            MO_DBG_INFO("Installing");
-            stage = UpdateStage::Installing;
-
-            if (onInstall) {
-                onInstall(location.c_str()); //may restart the device on success
-
-                timestampTransition = mocpp_tick_ms();
-                delayTransition = installationStatusInput ? 1000 : 120 * 1000;
-            }
-            return;
-        }
-
-        if (stage == UpdateStage::Installing) {
-
-            if (installationStatusInput) {
-                if (installationStatusInput() == InstallationStatus::Installed) {
-                    MO_DBG_INFO("FW update finished");
-                    //Charger may reboot during onInstall. If it doesn't, server will send Reset request
-                    resetStage();
-                    retries = 0; //End of update routine
-                    stage = UpdateStage::Installed;
-                    location.clear();
-                } else if (installationStatusInput() == InstallationStatus::InstallationFailed) {
-                    MO_DBG_INFO("Installation timeout or failed! Retry");
-                    retreiveDate = timestampNow;
-                    retreiveDate += retryInterval;
-                    retries--;
-                    resetStage();
-
-                    timestampTransition = mocpp_tick_ms();
-                    delayTransition = 10000;
-                }
-                return;
-            } else {
-                MO_DBG_INFO("FW update finished");
-                //Charger may reboot during onInstall. If it doesn't, server will send Reset request
-                resetStage();
-                stage = UpdateStage::Installed;
-                retries = 0; //End of update routine
-                location.clear();
-                return;
-            }
-        }
-
-        //should never reach this code
-        MO_DBG_ERR("Firmware update failed");
-        retries = 0;
-        resetStage();
-        stage = UpdateStage::InternalError;
-        location.clear();
-    }
+#endif
 }
 
-void FirmwareService::scheduleFirmwareUpdate(const char *location, Timestamp retreiveDate, unsigned int retries, unsigned int retryInterval) {
-
+/* ---------------------------------------------------------------------- */
+void FirmwareService::scheduleFirmwareUpdate(const char* loc, Timestamp rd,
+                                             unsigned int r, unsigned int ri)
+{
     if (!onDownload && !onInstall) {
         MO_DBG_ERR("FW service not configured");
-        stage = UpdateStage::InternalError; //will send "InstallationFailed" and not proceed with update
+        stage = UpdateStage::InternalError;
         return;
     }
 
-    this->location = location;
-    this->retreiveDate = retreiveDate;
-    this->retries = retries;
-    this->retryInterval = retryInterval;
+    location      = loc;
+    retreiveDate  = rd;
+    retries       = r;
+    retryInterval = ri;
 
-    if (MO_IGNORE_FW_RETR_DATE) {
-        MO_DBG_DEBUG("ignore FW update retreive date");
-        this->retreiveDate = context.getModel().getClock().now();
-    }
+#if MO_IGNORE_FW_RETR_DATE
+    retreiveDate = context.getModel().getClock().now();
+#endif
 
-    char dbuf [JSONDATE_LENGTH + 1] = {'\0'};
-    this->retreiveDate.toJsonString(dbuf, JSONDATE_LENGTH + 1);
+    char buf[JSONDATE_LENGTH + 1] = {};
+    retreiveDate.toJsonString(buf, sizeof(buf));
 
-    MO_DBG_INFO("Scheduled FW update!\n" \
-                    "                  location = %s\n" \
-                    "                  retrieveDate = %s\n" \
-                    "                  retries = %u" \
-                    ", retryInterval = %u",
-            this->location.c_str(),
-            dbuf,
-            this->retries,
-            this->retryInterval);
+    MO_DBG_INFO("Scheduled FW update:"
+                "\n  url            = %s"
+                "\n  retrieveDate   = %s"
+                "\n  retries        = %u"
+                "\n  retryInterval  = %u",
+                location.c_str(), buf, retries, retryInterval);
 
     timestampTransition = mocpp_tick_ms();
-    delayTransition = 1000;
-
+    delayTransition     = 1000;
     resetStage();
 }
 
-FirmwareStatus FirmwareService::getFirmwareStatus() {
-
-    if (stage == UpdateStage::Installed) {
-        return FirmwareStatus::Installed;
-    } else if (stage == UpdateStage::InternalError) {
-        return FirmwareStatus::InstallationFailed; 
-    }
+/* ---------------------------------------------------------------------- */
+FirmwareStatus FirmwareService::getFirmwareStatus()
+{
+    if (stage == UpdateStage::Installed)     return FirmwareStatus::Installed;
+    if (stage == UpdateStage::InternalError) return FirmwareStatus::InstallationFailed;
 
     if (installationIssued) {
-        if (installationStatusInput != nullptr) {
-            if (installationStatusInput() == InstallationStatus::Installed) {
-                return FirmwareStatus::Installed;
-            } else if (installationStatusInput() == InstallationStatus::InstallationFailed) {
-                return FirmwareStatus::InstallationFailed;
-            }
+        if (installationStatusInput) {
+            auto s = installationStatusInput();
+            if (s == InstallationStatus::Installed)         return FirmwareStatus::Installed;
+            if (s == InstallationStatus::InstallationFailed) return FirmwareStatus::InstallationFailed;
         }
-        if (onInstall != nullptr)
-            return FirmwareStatus::Installing;
+        return FirmwareStatus::Installing;
     }
-    
+
     if (downloadIssued) {
-        if (downloadStatusInput != nullptr) {
-            if (downloadStatusInput() == DownloadStatus::Downloaded) {
-                return FirmwareStatus::Downloaded;
-            } else if (downloadStatusInput() == DownloadStatus::DownloadFailed) {
-                return FirmwareStatus::DownloadFailed;
-            }
+        if (downloadStatusInput) {
+            auto s = downloadStatusInput();
+            if (s == DownloadStatus::Downloaded)     return FirmwareStatus::Downloaded;
+            if (s == DownloadStatus::DownloadFailed) return FirmwareStatus::DownloadFailed;
         }
-        if (onDownload != nullptr)
-            return FirmwareStatus::Downloading;
+        return FirmwareStatus::Downloading;
     }
 
     return FirmwareStatus::Idle;
 }
 
-std::unique_ptr<Request> FirmwareService::getFirmwareStatusNotification() {
-    /*
-     * Check if FW has been updated previously, but only once
-     */
-    if (!checkedSuccessfulFwUpdate && !buildNumber.empty() && previousBuildNumberString != nullptr) {
+/* ---------------------------------------------------------------------- */
+std::unique_ptr<MicroOcpp::Request> FirmwareService::getFirmwareStatusNotification()
+{
+    if (!checkedSuccessfulFwUpdate && !buildNumber.empty() && previousBuildNumberString) {
         checkedSuccessfulFwUpdate = true;
 
-        MO_DBG_DEBUG("Previous build number: %s, new build number: %s", previousBuildNumberString->getString(), buildNumber.c_str());
-        
         if (buildNumber.compare(previousBuildNumberString->getString())) {
-            //new FW
             previousBuildNumberString->setString(buildNumber.c_str());
             configuration_save();
-
             buildNumber.clear();
 
             lastReportedStatus = FirmwareStatus::Installed;
-            auto fwNotificationMsg = new Ocpp16::FirmwareStatusNotification(lastReportedStatus);
-            auto fwNotification = makeRequest(fwNotificationMsg);
-            return fwNotification;
+            return makeRequest(new Ocpp16::FirmwareStatusNotification(lastReportedStatus));
         }
     }
 
-    if (getFirmwareStatus() != lastReportedStatus) {
-        lastReportedStatus = getFirmwareStatus();
-        if (lastReportedStatus != FirmwareStatus::Idle) {
-            auto fwNotificationMsg = new Ocpp16::FirmwareStatusNotification(lastReportedStatus);
-            auto fwNotification = makeRequest(fwNotificationMsg);
-            return fwNotification;
-        }
+    auto current = getFirmwareStatus();
+    if (current != lastReportedStatus && current != FirmwareStatus::Idle) {
+        lastReportedStatus = current;
+        return makeRequest(new Ocpp16::FirmwareStatusNotification(current));
     }
-
     return nullptr;
 }
 
-void FirmwareService::setOnDownload(std::function<bool(const char *location)> onDownload) {
-    this->onDownload = onDownload;
-}
+/* ---------------------------------------------------------------------- */
+void FirmwareService::setOnDownload(std::function<bool(const char*)> cb)          { onDownload             = std::move(cb); }
+void FirmwareService::setDownloadStatusInput(std::function<DownloadStatus()> cb)  { downloadStatusInput    = std::move(cb); }
+void FirmwareService::setOnInstall(std::function<bool(const char*)> cb)           { onInstall              = std::move(cb); }
+void FirmwareService::setInstallationStatusInput(std::function<InstallationStatus()> cb) { installationStatusInput = std::move(cb); }
 
-void FirmwareService::setDownloadStatusInput(std::function<DownloadStatus()> downloadStatusInput) {
-    this->downloadStatusInput = downloadStatusInput;
-}
-
-void FirmwareService::setOnInstall(std::function<bool(const char *location)> onInstall) {
-    this->onInstall = onInstall;
-}
-
-void FirmwareService::setInstallationStatusInput(std::function<InstallationStatus()> installationStatusInput) {
-    this->installationStatusInput = installationStatusInput;
-}
-
-void FirmwareService::resetStage() {
-    stage = UpdateStage::Idle;
-    downloadIssued = false;
+/* ---------------------------------------------------------------------- */
+void FirmwareService::resetStage()
+{
+    stage              = UpdateStage::Idle;
+    downloadIssued     = false;
     installationIssued = false;
+
+    /* FIX #1: clear last result so the next attempt starts with “Downloading” */
+    ftpDownloadStatus  = DownloadStatus::NotDownloaded;
 }
 
-void FirmwareService::setDownloadFileWriter(std::function<size_t(const unsigned char *buf, size_t size)> firmwareWriter, std::function<void(MO_FtpCloseReason)> onClose) {
+/* ====================================================================== */
+/*  generic download handler (FTP + HTTP/S with link validation)          */
+/* ====================================================================== */
+void FirmwareService::setDownloadFileWriter(
+        std::function<size_t(const unsigned char*, size_t)> firmwareWriter,
+        std::function<void(MO_FtpCloseReason)>              onClose)
+{
+    onDownload = [this, firmwareWriter, onClose](const char* url) -> bool {
 
-    this->onDownload = [this, firmwareWriter, onClose] (const char *location) -> bool {
+        /* ----------------------------------------------------------------
+         *  HTTP / HTTPS path – quick 5 s HEAD to validate reachability
+         * ---------------------------------------------------------------- */
+        if (strncmp(url, "ftp://", 6) != 0) {
 
+#if MO_PLATFORM == MO_PLATFORM_ARDUINO
+            ftpDownloadStatus = DownloadStatus::NotDownloaded;   /* FIX #2 */
+            
+            /* create client first – it must out‑live HTTPClient -------- */
+        #if defined(ESP32)
+            std::unique_ptr<WiFiClient>  net;
+            if (strncmp(url, "https://", 8) == 0) {
+                auto* ssl = new WiFiClientSecure;
+                ssl->setInsecure();
+                net.reset(ssl);
+            } else {
+                net.reset(new WiFiClient());
+            }
+            HTTPClient http;
+            bool linkOk = false;
+            if (http.begin(*net, url)) {
+                http.setTimeout(5000);
+                http.setReuse(false);               // ensure .end() really closes
+                int code = http.sendRequest("HEAD");
+                linkOk   = (code > 0 && code < 400);
+                http.end();                         // closes + clears _tcp ptr
+            }
+        #elif defined(ESP8266)
+            WiFiClient         plain;
+            WiFiClientSecure   secure;
+            HTTPClient         http;
+            bool linkOk = false;
+
+            bool beginOk = (strncmp(url, "https://", 8) == 0)
+                               ? http.begin(secure, url)   // secure gets setInsecure() inside begin()
+                               : http.begin(plain , url);
+
+            if (beginOk) {
+                http.setTimeout(5000);
+                http.setReuse(false);
+                int code = http.sendRequest("HEAD");
+                linkOk   = (code > 0 && code < 400);
+                http.end();
+            }
+        #endif  // ESP platform switch
+
+            if (linkOk) {
+                ftpDownloadStatus = DownloadStatus::Downloaded;
+                return true;
+            } else {
+                MO_DBG_WARN("FW‑Update: URL unreachable – abort");
+                ftpDownloadStatus = DownloadStatus::DownloadFailed;
+                return false;
+            }
+#else   // non‑Arduino build
+            ftpDownloadStatus = DownloadStatus::DownloadFailed;
+            return false;
+#endif
+        }
+
+        /* ----------------------------------------------------------------
+         *  FTP path (unchanged)
+         * ---------------------------------------------------------------- */
         auto ftpClient = context.getFtpClient();
         if (!ftpClient) {
             MO_DBG_ERR("FTP client not set");
-            this->ftpDownloadStatus = DownloadStatus::DownloadFailed;
+            ftpDownloadStatus = DownloadStatus::DownloadFailed;
             return false;
         }
 
-        this->ftpDownload = ftpClient->getFile(location, firmwareWriter,
-            [this, onClose] (MO_FtpCloseReason reason) -> void {
-                if (reason == MO_FtpCloseReason_Success) {
-                    MO_DBG_INFO("FTP download success");
-                    this->ftpDownloadStatus = DownloadStatus::Downloaded;
-                } else {
-                    MO_DBG_INFO("FTP download failure (%i)", reason);
-                    this->ftpDownloadStatus = DownloadStatus::DownloadFailed;
-                }
-
+        ftpDownload = ftpClient->getFile(
+            url,
+            firmwareWriter,
+            [this, onClose](MO_FtpCloseReason reason) {
+                ftpDownloadStatus = (reason == MO_FtpCloseReason_Success)
+                                  ? DownloadStatus::Downloaded
+                                  : DownloadStatus::DownloadFailed;
                 onClose(reason);
             });
 
-        if (this->ftpDownload) {
-            this->ftpDownloadStatus = DownloadStatus::NotDownloaded;
+        if (ftpDownload) {
+            ftpDownloadStatus = DownloadStatus::NotDownloaded;
             return true;
-        } else {
-            this->ftpDownloadStatus = DownloadStatus::DownloadFailed;
-            return false;
         }
+
+        ftpDownloadStatus = DownloadStatus::DownloadFailed;
+        return false;
     };
 
-    this->downloadStatusInput = [this] () {
-        return this->ftpDownloadStatus;
-    };
+    downloadStatusInput = [this]() { return ftpDownloadStatus; };
 }
 
-void FirmwareService::setFtpServerCert(const char *cert) {
-    this->ftpServerCert = cert;
-}
 
+void FirmwareService::setFtpServerCert(const char* cert) { ftpServerCert = cert; }
+
+/* ====================================================================== */
+/*  Default ESP integration:  FTP or HTTPS                                */
+/* ====================================================================== */
 #if !defined(MO_CUSTOM_UPDATER)
+
 #if MO_PLATFORM == MO_PLATFORM_ARDUINO && defined(ESP32) && MO_ENABLE_MBEDTLS
+/* ---------------------------------------------------------------------- */
+std::unique_ptr<FirmwareService> MicroOcpp::makeDefaultFirmwareService(Context& ctx)
+{
+    auto fw = std::unique_ptr<FirmwareService>(new FirmwareService(ctx));
+    auto fs = fw.get();
 
-#include <Update.h>
-
-std::unique_ptr<FirmwareService> MicroOcpp::makeDefaultFirmwareService(Context& context) {
-    std::unique_ptr<FirmwareService> fwService = std::unique_ptr<FirmwareService>(new FirmwareService(context));
-    auto ftServicePtr = fwService.get();
-
-    fwService->setDownloadFileWriter(
-        [ftServicePtr] (const unsigned char *data, size_t size) -> size_t {
+    /* ----------------------------- FTP (chunked) writer --------------- */
+    fw->setDownloadFileWriter(
+        [fs](const unsigned char* data, size_t len) -> size_t {
             if (!Update.isRunning()) {
-                MO_DBG_DEBUG("start writing FW");
-                MO_DBG_WARN("Built-in updater for ESP32 is only intended for demonstration purposes");
-                ftServicePtr->setInstallationStatusInput([](){return InstallationStatus::NotInstalled;});
-
-                auto ret = Update.begin();
-                if (!ret) {
-                    MO_DBG_ERR("cannot start update: %i", ret);
+                fs->setInstallationStatusInput([] { return InstallationStatus::NotInstalled; });
+                if (!Update.begin()) {
+                    MO_DBG_ERR("Update.begin() failed");
                     return 0;
                 }
             }
+            return Update.write((uint8_t*)data, len);
+        },
+        [](MO_FtpCloseReason r) { if (r != MO_FtpCloseReason_Success) Update.abort(); });
 
-            size_t written = Update.write((uint8_t*) data, size);
+    /* ----------------------------- installer (FTP finish OR HTTP/S) --- */
+    fw->setOnInstall([fs](const char* url) {
 
-            #if MO_DBG_LEVEL >= MO_DL_INFO
-            {
-                size_t progress = Update.progress();
-
-                bool printProgress = false;
-
-                if (progress <= 10000) {
-                    size_t p1k = progress / 1000;
-                    printProgress = progress < p1k * 1000 + written && progress >= p1k * 1000;
-                } else if (progress <= 100000) {
-                    size_t p10k = progress / 10000;
-                    printProgress = progress < p10k * 10000 + written && progress >= p10k * 10000;
-                } else {
-                    size_t p100k = progress / 100000;
-                    printProgress = progress < p100k * 100000 + written && progress >= p100k * 100000;
-                }
-
-                if (printProgress) {
-                    MO_DBG_INFO("update progress: %zu kB", progress / 1000);
-                }
+        /* ---------- FTP branch (already written) ---------------------- */
+        if (Update.isRunning()) {
+            if (Update.end(true)) {                       // finalize, **no reboot**
+                fs->setInstallationStatusInput([] { return InstallationStatus::Installed; });
+                fs->scheduleDelayedRestart();             // reboot later
+            } else {
+                fs->setInstallationStatusInput([] { return InstallationStatus::InstallationFailed; });
             }
-            #endif //MO_DBG_LEVEL >= MO_DL_DEBUG
-
-            return written;
-        }, [] (MO_FtpCloseReason reason) {
-            if (reason != MO_FtpCloseReason_Success) {
-                Update.abort();
-            }
-        });
-
-    fwService->setOnInstall([ftServicePtr] (const char *location) {
-
-        if (Update.isRunning() && Update.end(true)) {
-            MO_DBG_DEBUG("update success");
-            ftServicePtr->setInstallationStatusInput([](){return InstallationStatus::Installed;});
-
-            ESP.restart();
-        } else {
-            MO_DBG_ERR("update failed");
-            ftServicePtr->setInstallationStatusInput([](){return InstallationStatus::InstallationFailed;});
+            return true;
         }
 
+        /* ---------- HTTP / HTTPS one‑shot ----------------------------- */
+        httpUpdate.rebootOnUpdate(false);                 // suppress auto‑reboot
+        fs->setInstallationStatusInput([] { return InstallationStatus::NotInstalled; });
+
+        WiFiClientSecure client;
+        client.setTimeout(60);
+        client.setInsecure();
+
+        t_httpUpdate_return ret = httpUpdate.update(client, url);
+
+        if (ret == HTTP_UPDATE_OK) {
+            fs->setInstallationStatusInput([] { return InstallationStatus::Installed; });
+            fs->scheduleDelayedRestart();
+        } else {
+            fs->setInstallationStatusInput([] { return InstallationStatus::InstallationFailed; });
+            MO_DBG_WARN("HTTP update failed (%d)", ret);
+        }
         return true;
     });
 
-    fwService->setInstallationStatusInput([] () {
-        return InstallationStatus::NotInstalled;
-    });
-
-    return fwService;
+    fw->setInstallationStatusInput([] { return InstallationStatus::NotInstalled; });
+    return fw;
 }
 
+/* ---------------------------------------------------------------------- */
 #elif MO_PLATFORM == MO_PLATFORM_ARDUINO && defined(ESP8266)
 
-#include <ESP8266httpUpdate.h>
+std::unique_ptr<FirmwareService> MicroOcpp::makeDefaultFirmwareService(Context& ctx)
+{
+    auto fw = std::unique_ptr<FirmwareService>(new FirmwareService(ctx));
+    auto fs = fw.get();
 
-std::unique_ptr<FirmwareService> MicroOcpp::makeDefaultFirmwareService(Context& context) {
-    std::unique_ptr<FirmwareService> fwService = std::unique_ptr<FirmwareService>(new FirmwareService(context));
-    auto fwServicePtr = fwService.get();
+    fw->setOnInstall([fs](const char* url) {
 
-    fwService->setOnInstall([fwServicePtr] (const char *location) {
-        
-        MO_DBG_WARN("Built-in updater for ESP8266 is only intended for demonstration purposes. HTTP support only");
+        httpUpdate.rebootOnUpdate(false);                 // suppress auto‑reboot
+        fs->setInstallationStatusInput([] { return InstallationStatus::NotInstalled; });
 
-        WiFiClient client;
-        //WiFiClientSecure client;
-        //client.setCACert(rootCACertificate);
-        client.setTimeout(60); //in seconds
+        WiFiClient client;                // insecure for demo; add CA for production
+        client.setTimeout(60);
 
-        //ESPhttpUpdate.setLedPin(downloadStatusLedPin);
+        HTTPUpdateResult ret = ESPhttpUpdate.update(client, url);
 
-        HTTPUpdateResult ret = ESPhttpUpdate.update(client, location);
-
-        switch (ret) {
-            case HTTP_UPDATE_FAILED:
-                fwServicePtr->setInstallationStatusInput([](){return InstallationStatus::InstallationFailed;});
-                MO_DBG_WARN("HTTP_UPDATE_FAILED Error (%d): %s\n", ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str());
-                break;
-            case HTTP_UPDATE_NO_UPDATES:
-                fwServicePtr->setInstallationStatusInput([](){return InstallationStatus::InstallationFailed;});
-                MO_DBG_WARN("HTTP_UPDATE_NO_UPDATES");
-                break;
-            case HTTP_UPDATE_OK:
-                fwServicePtr->setInstallationStatusInput([](){return InstallationStatus::Installed;});
-                MO_DBG_INFO("HTTP_UPDATE_OK");
-                ESP.restart();
-                break;
+        if (ret == HTTP_UPDATE_OK) {
+            fs->setInstallationStatusInput([] { return InstallationStatus::Installed; });
+            fs->scheduleDelayedRestart();
+        } else {
+            fs->setInstallationStatusInput([] { return InstallationStatus::InstallationFailed; });
+            MO_DBG_WARN("HTTP update failed (%d)", ret);
         }
-
         return true;
     });
 
-    fwService->setInstallationStatusInput([] () {
-        return InstallationStatus::NotInstalled;
-    });
-
-    return fwService;
+    fw->setInstallationStatusInput([] { return InstallationStatus::NotInstalled; });
+    return fw;
 }
-
-#endif //MO_PLATFORM
-#endif //!defined(MO_CUSTOM_UPDATER)
+#endif
+#endif // !MO_CUSTOM_UPDATER

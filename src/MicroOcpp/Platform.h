@@ -5,8 +5,6 @@
 #ifndef MO_PLATFORM_H
 #define MO_PLATFORM_H
 
-#include <stdint.h>
-
 #define MO_PLATFORM_NONE    0
 #define MO_PLATFORM_ARDUINO 1
 #define MO_PLATFORM_ESPIDF  2
@@ -14,12 +12,6 @@
 
 #ifndef MO_PLATFORM
 #define MO_PLATFORM MO_PLATFORM_ARDUINO
-#endif
-
-#ifdef __cplusplus
-#define MO_EXTERN_C extern "C"
-#else
-#define MO_EXTERN_C
 #endif
 
 #if MO_PLATFORM == MO_PLATFORM_NONE
@@ -38,10 +30,18 @@
 #define MO_CUSTOM_CONSOLE_MAXMSGSIZE 256
 #endif
 
-extern char _mo_console_msg_buf [MO_CUSTOM_CONSOLE_MAXMSGSIZE]; //define msg_buf in data section to save memory (see https://github.com/matth-x/MicroOcpp/pull/304)
-MO_EXTERN_C void _mo_console_out(const char *msg);
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-MO_EXTERN_C void mocpp_set_console_out(void (*console_out)(const char *msg));
+extern char _mo_console_msg_buf [MO_CUSTOM_CONSOLE_MAXMSGSIZE]; //define msg_buf in data section to save memory (see https://github.com/matth-x/MicroOcpp/pull/304)
+void _mo_console_out(const char *msg);
+
+void mocpp_set_console_out(void (*console_out)(const char *msg));
+
+#ifdef __cplusplus
+}
+#endif
 
 #define MO_CONSOLE_PRINTF(X, ...) \
             do { \
@@ -77,9 +77,9 @@ MO_EXTERN_C void mocpp_set_console_out(void (*console_out)(const char *msg));
 #endif
 
 #ifdef MO_CUSTOM_TIMER
-MO_EXTERN_C void mocpp_set_timer(unsigned long (*get_ms)());
+extern "C" void mocpp_set_timer(unsigned long (*get_ms)());
 
-MO_EXTERN_C unsigned long mocpp_tick_ms_custom();
+extern "C" unsigned long mocpp_tick_ms_custom();
 #define mocpp_tick_ms mocpp_tick_ms_custom
 #else
 
@@ -87,28 +87,19 @@ MO_EXTERN_C unsigned long mocpp_tick_ms_custom();
 #include <Arduino.h>
 #define mocpp_tick_ms millis
 #elif MO_PLATFORM == MO_PLATFORM_ESPIDF
-MO_EXTERN_C unsigned long mocpp_tick_ms_espidf();
+extern "C" unsigned long mocpp_tick_ms_espidf();
 #define mocpp_tick_ms mocpp_tick_ms_espidf
 #elif MO_PLATFORM == MO_PLATFORM_UNIX
-MO_EXTERN_C unsigned long mocpp_tick_ms_unix();
+extern "C" unsigned long mocpp_tick_ms_unix();
 #define mocpp_tick_ms mocpp_tick_ms_unix
 #endif
-#endif
-
-#ifdef MO_CUSTOM_RNG
-MO_EXTERN_C void mocpp_set_rng(uint32_t (*rng)());
-MO_EXTERN_C uint32_t mocpp_rng_custom();
-#define mocpp_rng mocpp_rng_custom
-#else
-MO_EXTERN_C uint32_t mocpp_time_based_prng(void);
-#define mocpp_rng mocpp_time_based_prng
 #endif
 
 #ifndef MO_MAX_JSON_CAPACITY
 #if MO_PLATFORM == MO_PLATFORM_UNIX
 #define MO_MAX_JSON_CAPACITY 16384
 #else
-#define MO_MAX_JSON_CAPACITY 4096
+#define MO_MAX_JSON_CAPACITY 32768
 #endif
 #endif
 

@@ -44,6 +44,8 @@ public:
 
     Connection& getConnection();
 
+    long getLastMessageReceived();
+
     RequestQueue& getRequestQueue();
 
     void setFtpClient(std::unique_ptr<FtpClient> ftpClient);

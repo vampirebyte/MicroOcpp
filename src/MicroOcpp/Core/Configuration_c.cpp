@@ -15,15 +15,7 @@ private:
 public:
     ConfigurationC(ocpp_configuration *config) :
             config(config) {
-        if (config->read_only) {
-            setReadOnly();
-        }
-        if (config->write_only) {
-            setWriteOnly();
-        }
-        if (config->reboot_required) {
-            setRebootRequired();
-        }
+        config->mo_data = this;
     }
 
     bool setKey(const char *key) override {
@@ -124,59 +116,6 @@ public:
     }
 };
 
-namespace MicroOcpp {
-
-ConfigurationC *getConfigurationC(ocpp_configuration *config) {
-    if (!config->mo_data) {
-        return nullptr;
-    }
-    return reinterpret_cast<std::shared_ptr<ConfigurationC>*>(config->mo_data)->get();
-}
-
-}
-
-using namespace MicroOcpp;
-
-
-void ocpp_setRebootRequired(ocpp_configuration *config) {
-    if (auto c = getConfigurationC(config)) {
-        c->setRebootRequired();
-    }
-    config->reboot_required = true;
-}
-bool ocpp_isRebootRequired(ocpp_configuration *config) {
-    if (auto c = getConfigurationC(config)) {
-        return c->isRebootRequired();
-    }
-    return config->reboot_required;
-}
-
-void ocpp_setReadOnly(ocpp_configuration *config) {
-    if (auto c = getConfigurationC(config)) {
-        c->setReadOnly();
-    }
-    config->read_only = true;
-}
-bool ocpp_isReadOnly(ocpp_configuration *config) {
-    if (auto c = getConfigurationC(config)) {
-        return c->isReadOnly();
-    }
-    return config->read_only;
-}
-bool ocpp_isReadable(ocpp_configuration *config) {
-    if (auto c = getConfigurationC(config)) {
-        return c->isReadable();
-    }
-    return !config->write_only;
-}
-
-void ocpp_setWriteOnly(ocpp_configuration *config) {
-    if (auto c = getConfigurationC(config)) {
-        c->setWriteOnly();
-    }
-    config->write_only = true;
-}
-
 class ConfigurationContainerC : public ConfigurationContainer, public MemoryManaged {
 private:
     ocpp_configuration_container *container;
@@ -186,41 +125,15 @@ public:
 
     }
 
-    ~ConfigurationContainerC() {
-        for (size_t i = 0; i < container->size(container->user_data); i++) {
-            if (auto config = container->get_configuration(container->user_data, i)) {
-                if (config->mo_data) {
-                    delete reinterpret_cast<std::shared_ptr<ConfigurationC>*>(config->mo_data);
-                    config->mo_data = nullptr;
-                }
-            }
-        }
-    }
-
     bool load() override {
-        if (container->load) {
-            return container->load(container->user_data);
-        } else {
-            return true;
-        }
+        return container->load(container->user_data);
     }
 
     bool save() override {
-        if (container->save) {
-            return container->save(container->user_data);
-        } else {
-            return true;
-        }
+        return container->save(container->user_data);
     }
 
     std::shared_ptr<Configuration> createConfiguration(TConfig type, const char *key) override {
-
-        auto result = std::shared_ptr<ConfigurationC>(nullptr, std::default_delete<ConfigurationC>(), makeAllocator<ConfigurationC>(getMemoryTag()));
-
-        if (!container->create_configuration) {
-            return result;
-        }
-
         ocpp_config_datatype dt;
         switch (type) {
             case TConfig::Int:
@@ -234,38 +147,19 @@ public:
                 break;
             default:
                 MO_DBG_ERR("internal error");
-                return result;
+                return nullptr;
         }
         ocpp_configuration *config = container->create_configuration(container->user_data, dt, key);
-        if (!config) {
-            return result;
-        }
-        
-        result.reset(new ConfigurationC(config));
 
-        if (result) {
-            auto captureConfigC = new std::shared_ptr<ConfigurationC>(result);
-            config->mo_data = reinterpret_cast<void*>(captureConfigC);
+        if (config) {
+            return std::allocate_shared<ConfigurationC>(makeAllocator<ConfigurationC>(getMemoryTag()), config);
         } else {
             MO_DBG_ERR("could not create config: %s", key);
-            if (container->remove) {
-                container->remove(container->user_data, key);
-            }
+            return nullptr;
         }
-
-        return result;
     }
 
     void remove(Configuration *config) override {
-        if (!container->remove) {
-            return;
-        }
-
-        if (auto c = container->get_configuration_by_key(container->user_data, config->getKey())) {
-            delete reinterpret_cast<std::shared_ptr<ConfigurationC>*>(c->mo_data);
-            c->mo_data = nullptr;
-        }
-
         container->remove(container->user_data, config->getKey());
     }
 
@@ -276,28 +170,16 @@ public:
     Configuration *getConfiguration(size_t i) override {
         auto config = container->get_configuration(container->user_data, i);
         if (config) {
-            if (!config->mo_data) {
-                auto c = new ConfigurationC(config);
-                if (c) {
-                    config->mo_data = reinterpret_cast<void*>(new std::shared_ptr<ConfigurationC>(c, std::default_delete<ConfigurationC>(), makeAllocator<ConfigurationC>(getMemoryTag())));
-                }
-            }
-            return static_cast<Configuration*>(config->mo_data ? reinterpret_cast<std::shared_ptr<ConfigurationC>*>(config->mo_data)->get() : nullptr);
+            return static_cast<Configuration*>(config->mo_data);
         } else {
             return nullptr;
         }
     }
 
     std::shared_ptr<Configuration> getConfiguration(const char *key) override {
-        auto config = container->get_configuration_by_key(container->user_data, key);
+        ocpp_configuration *config = container->get_configuration_by_key(container->user_data, key);
         if (config) {
-            if (!config->mo_data) {
-                auto c = new ConfigurationC(config);
-                if (c) {
-                    config->mo_data = reinterpret_cast<void*>(new std::shared_ptr<ConfigurationC>(c, std::default_delete<ConfigurationC>(), makeAllocator<ConfigurationC>(getMemoryTag())));
-                }
-            }
-            return config->mo_data ? *reinterpret_cast<std::shared_ptr<ConfigurationC>*>(config->mo_data) : nullptr;
+            return std::allocate_shared<ConfigurationC>(makeAllocator<ConfigurationC>(getMemoryTag()), config);
         } else {
             return nullptr;
         }

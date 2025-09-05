@@ -36,6 +36,11 @@
 #include <MicroOcpp/Operations/CustomOperation.h>
 
 #include <MicroOcpp/Debug.h>
+#include <MicroOcpp/Core/Configuration.h>
+
+#if MO_PLATFORM == MO_PLATFORM_ARDUINO
+#include <Arduino.h>
+#endif
 
 namespace MicroOcpp {
 namespace Facade {
@@ -48,9 +53,7 @@ Connection *connection {nullptr};
 Context *context {nullptr};
 std::shared_ptr<FilesystemAdapter> filesystem;
 
-#ifndef MO_NUMCONNECTORS
-#define MO_NUMCONNECTORS 2
-#endif
+int MONoOfConnectors = -1;
 
 #define OCPP_ID_OF_CP 0
 #define OCPP_ID_OF_CONNECTOR 1
@@ -246,13 +249,292 @@ ChargerCredentials ChargerCredentials::v201(const char *cpModel, const char *cpV
     return res;
 }
 
-void mocpp_initialize(Connection& connection, const char *bootNotificationCredentials, std::shared_ptr<FilesystemAdapter> fs, bool autoRecover, MicroOcpp::ProtocolVersion version) {
+void initialize_files_system(std::shared_ptr<FilesystemAdapter> fs)
+{    
+    configuration_init(fs); //call before each other library call
+
+    MO_DBG_DEBUG("initialize filesystem");
+}
+
+void mo_configuration_load()
+{
+    bool sucess = configuration_load(); //load configuration from filesystem
+
+    if (!sucess) {
+        MO_DBG_ERR("configuration_load failed");
+    }
+}
+
+
+
+bool is_system_time_valid()
+{
+  if (!context) {
+    MO_DBG_WARN("Please call mocpp_initialize before");
+    return false;
+  }
+
+  auto& cretTime = context->getModel().getClock();
+
+  return cretTime.isValid();
+}
+
+void get_system_time(char *timestamp){
+    if (!context) {
+        MO_DBG_WARN("Please call mocpp_initialize before");
+        return;
+    }
+    
+    auto& cretTime = context->getModel().getClock();
+    cretTime.now().toJsonString(timestamp, JSONDATE_LENGTH + 1);
+}
+
+int get_transaction_id(int connectorId){
+  if (!context) {
+    MO_DBG_WARN("Please call mocpp_initialize before");
+    return -1;
+  }
+
+  auto& model = context->getModel();
+  auto transactionStore = model.getTransactionStore();
+  if (!transactionStore) {
+    MO_DBG_ERR("No transaction store available");
+    return -1;
+  }
+
+  auto transaction = transactionStore->getActiveTransaction(connectorId);
+  if (!transaction) {
+    //MO_DBG_ERR("No transaction found for connector %d", connectorId); Annoying, because this is expected if no transaction is running
+    return -1;
+  }
+
+  return transaction->getTransactionId();
+}
+
+bool is_in_session(int connectorId){
+    if (!context) {
+        MO_DBG_WARN("Please call mocpp_initialize before");
+        return -1;
+    }
+        
+    const char *tag = getTransactionIdTag(connectorId);
+    if (!tag || !*tag) {
+        return false;
+    }
+    else{
+        return true;
+    }
+}
+
+
+bool mocpp_initialized() {
+  if (!context) {
+    return false;
+  }else
+    return true;
+}
+
+long getLastMessageReceived(){
+    if (!context) {
+        MO_DBG_WARN("Please call mocpp_initialize before");
+        return -1;
+    }
+    
+    return context->getLastMessageReceived();
+}
+
+
+void moDeclareStringConfiguration(const char *keyName)
+{
+    declareConfiguration<const char *>(keyName, "");
+}
+
+void moDeclareIntConfiguration(const char *keyName)
+{
+    declareConfiguration<int>(keyName, 0);
+}
+
+void moDeclareBoolConfiguration(const char *keyName)
+{
+    declareConfiguration<bool>(keyName, false);
+}
+
+const char *getOCPPStringConfigurationValue(const char *keyName)
+{
+    auto cfg = declareConfiguration<const char *>(keyName, "");
+    return cfg->getString();
+}
+
+const int getOCPPIntConfigurationValue(const char *keyName)
+{
+    auto cfg = declareConfiguration<int>(keyName, 0);
+    return cfg->getInt();
+}
+
+const bool getOCPPBoolConfigurationValue(const char *keyName)
+{
+    auto cfg = declareConfiguration<bool>(keyName, false);
+    return cfg->getBool();
+}
+
+void setOCPPStringConfigurationValue(const char *keyName, const char *value)
+{
+    auto cfg = declareConfiguration<const char *>(keyName, "");
+    cfg->setString(value);
+    configuration_save();
+};
+
+void setOCPPIntConfigurationValue(const char *keyName, int value)
+{
+    auto cfg = declareConfiguration<int>(keyName, 0);
+    cfg->setInt(value);
+    configuration_save();
+};
+
+void setOCPPBoolConfigurationValue(const char *keyName, bool value)
+{
+    auto cfg = declareConfiguration<bool>(keyName, false);
+    cfg->setBool(value);
+    configuration_save();
+}
+
+void printAllConfigurations()
+{
+#if MO_PLATFORM == MO_PLATFORM_ARDUINO
+    Serial.println("=== All Configuration Keys and Values ===");
+    
+    // Get all accessible configuration containers
+    auto containers = getConfigurationContainersPublic();
+    
+    if (containers.size() == 0) {
+        Serial.println("No accessible configuration containers found.");
+        return;
+    }
+    
+    size_t totalConfigs = 0;
+    
+    // Iterate through all containers
+    for (size_t containerIndex = 0; containerIndex < containers.size(); containerIndex++) {
+        auto container = containers[containerIndex];
+        
+        Serial.printf("\n--- Container: %s ---\n", container->getFilename());
+        Serial.printf("Number of configurations: %zu\n", container->size());
+        
+        // Iterate through all configurations in this container
+        for (size_t configIndex = 0; configIndex < container->size(); configIndex++) {
+            auto config = container->getConfiguration(configIndex);
+            if (!config || !config->getKey()) {
+                continue; // Skip invalid configurations
+            }
+            
+            const char* key = config->getKey();
+            TConfig type = config->getType();
+            
+            Serial.printf("  %s = ", key);
+            
+            // Print value based on type
+            switch (type) {
+                case TConfig::Int:
+                    Serial.printf("%d (int)", config->getInt());
+                    break;
+                case TConfig::Bool:
+                    Serial.printf("%s (bool)", config->getBool() ? "true" : "false");
+                    break;
+                case TConfig::String:
+                    Serial.printf("\"%s\" (string)", config->getString());
+                    break;
+                default:
+                    Serial.printf("unknown type");
+                    break;
+            }
+            
+            // Add additional info
+            if (config->isReadOnly()) {
+                Serial.printf(" [READ-ONLY]");
+            }
+            if (config->isRebootRequired()) {
+                Serial.printf(" [REBOOT-REQUIRED]");
+            }
+            
+            Serial.println();
+            totalConfigs++;
+        }
+    }
+    
+    Serial.printf("\n=== Total: %zu configurations in %zu containers ===\n", totalConfigs, containers.size());
+#else
+    MO_DBG_INFO("=== All Configuration Keys and Values ===");
+    
+    // Get all accessible configuration containers
+    auto containers = getConfigurationContainersPublic();
+    
+    if (containers.size() == 0) {
+        MO_DBG_INFO("No accessible configuration containers found.");
+        return;
+    }
+    
+    size_t totalConfigs = 0;
+    
+    // Iterate through all containers
+    for (size_t containerIndex = 0; containerIndex < containers.size(); containerIndex++) {
+        auto container = containers[containerIndex];
+        
+        MO_DBG_INFO("--- Container: %s ---", container->getFilename());
+        MO_DBG_INFO("Number of configurations: %zu", container->size());
+        
+        // Iterate through all configurations in this container
+        for (size_t configIndex = 0; configIndex < container->size(); configIndex++) {
+            auto config = container->getConfiguration(configIndex);
+            if (!config || !config->getKey()) {
+                continue; // Skip invalid configurations
+            }
+            
+            const char* key = config->getKey();
+            TConfig type = config->getType();
+            
+            // Print value based on type
+            switch (type) {
+                case TConfig::Int:
+                    MO_DBG_INFO("  %s = %d (int)%s%s", key, config->getInt(),
+                               config->isReadOnly() ? " [READ-ONLY]" : "",
+                               config->isRebootRequired() ? " [REBOOT-REQUIRED]" : "");
+                    break;
+                case TConfig::Bool:
+                    MO_DBG_INFO("  %s = %s (bool)%s%s", key, config->getBool() ? "true" : "false",
+                               config->isReadOnly() ? " [READ-ONLY]" : "",
+                               config->isRebootRequired() ? " [REBOOT-REQUIRED]" : "");
+                    break;
+                case TConfig::String:
+                    MO_DBG_INFO("  %s = \"%s\" (string)%s%s", key, config->getString(),
+                               config->isReadOnly() ? " [READ-ONLY]" : "",
+                               config->isRebootRequired() ? " [REBOOT-REQUIRED]" : "");
+                    break;
+                default:
+                    MO_DBG_INFO("  %s = unknown type", key);
+                    break;
+            }
+            
+            totalConfigs++;
+        }
+    }
+    
+    MO_DBG_INFO("=== Total: %zu configurations in %zu containers ===", totalConfigs, containers.size());
+#endif
+}
+
+void mocpp_initialize(Connection& connection, const char *bootNotificationCredentials, std::shared_ptr<FilesystemAdapter> fs, bool autoRecover, MicroOcpp::ProtocolVersion version, int noOfConnectors) {
     if (context) {
         MO_DBG_WARN("already initialized. To reinit, call mocpp_deinitialize() before");
         return;
     }
 
     MO_DBG_DEBUG("initialize OCPP");
+
+    MONoOfConnectors = noOfConnectors + 1; //add one for the charge point itself
+    if (MONoOfConnectors < 1) {
+        MO_DBG_ERR("invalid number of connectors: %d", MONoOfConnectors);
+        return;
+    }
 
     filesystem = fs;
     MO_DBG_DEBUG("filesystem %s", filesystem ? "loaded" : "deactivated");
@@ -293,37 +575,31 @@ void mocpp_initialize(Connection& connection, const char *bootNotificationCreden
             new TransactionService(*context, filesystem, MO_NUM_EVSEID)));
         model.setRemoteControlService(std::unique_ptr<RemoteControlService>(
             new RemoteControlService(*context, MO_NUM_EVSEID)));
-        model.setResetServiceV201(std::unique_ptr<Ocpp201::ResetService>(
-            new Ocpp201::ResetService(*context)));
     } else
 #endif
     {
         model.setTransactionStore(std::unique_ptr<TransactionStore>(
-            new TransactionStore(MO_NUMCONNECTORS, filesystem)));
+            new TransactionStore(MONoOfConnectors, filesystem)));
         model.setConnectorsCommon(std::unique_ptr<ConnectorsCommon>(
-            new ConnectorsCommon(*context, MO_NUMCONNECTORS, filesystem)));
+            new ConnectorsCommon(*context, MONoOfConnectors, filesystem)));
         auto connectors = makeVector<std::unique_ptr<Connector>>("v16.ConnectorBase.Connector");
-        for (unsigned int connectorId = 0; connectorId < MO_NUMCONNECTORS; connectorId++) {
+        for (unsigned int connectorId = 0; connectorId < MONoOfConnectors; connectorId++) {
             connectors.emplace_back(new Connector(*context, filesystem, connectorId));
         }
         model.setConnectors(std::move(connectors));
+    }
+    model.setHeartbeatService(std::unique_ptr<HeartbeatService>(
+        new HeartbeatService(*context)));
 
 #if MO_ENABLE_LOCAL_AUTH
-        model.setAuthorizationService(std::unique_ptr<AuthorizationService>(
-            new AuthorizationService(*context, filesystem)));
+    model.setAuthorizationService(std::unique_ptr<AuthorizationService>(
+        new AuthorizationService(*context, filesystem)));
 #endif //MO_ENABLE_LOCAL_AUTH
 
 #if MO_ENABLE_RESERVATION
-        model.setReservationService(std::unique_ptr<ReservationService>(
-            new ReservationService(*context, MO_NUMCONNECTORS)));
+    model.setReservationService(std::unique_ptr<ReservationService>(
+        new ReservationService(*context, MONoOfConnectors)));
 #endif
-
-        model.setResetService(std::unique_ptr<ResetService>(
-            new ResetService(*context)));
-    }
-
-    model.setHeartbeatService(std::unique_ptr<HeartbeatService>(
-        new HeartbeatService(*context)));
 
 #if MO_ENABLE_CERT_MGMT && MO_ENABLE_CERT_STORE_MBEDTLS
     std::unique_ptr<CertificateStore> certStore = makeCertificateStoreMbedTLS(filesystem);
@@ -335,6 +611,18 @@ void mocpp_initialize(Connection& connection, const char *bootNotificationCreden
         model.getCertificateService()->setCertificateStore(std::move(certStore));
     }
 #endif
+
+#if MO_ENABLE_V201
+    if (version.major == 2) {
+        //depends on VariableService
+        model.setResetServiceV201(std::unique_ptr<Ocpp201::ResetService>(
+            new Ocpp201::ResetService(*context)));
+    } else
+#endif
+    {
+        model.setResetService(std::unique_ptr<ResetService>(
+            new ResetService(*context)));
+    }
 
 #if !defined(MO_CUSTOM_UPDATER)
 #if MO_PLATFORM == MO_PLATFORM_ARDUINO && defined(ESP32) && MO_ENABLE_MBEDTLS
@@ -369,12 +657,6 @@ void mocpp_initialize(Connection& connection, const char *bootNotificationCreden
     credsJson.reset();
 
     configuration_load();
-
-#if MO_ENABLE_V201
-    if (version.major == 2) {
-        model.getVariableService()->load();
-    }
-#endif //MO_ENABLE_V201
 
     MO_DBG_INFO("initialized MicroOcpp v" MO_VERSION " running OCPP %i.%i.%i", version.major, version.minor, version.patch);
 }
@@ -422,79 +704,41 @@ void mocpp_loop() {
     context->loop();
 }
 
-bool beginTransaction(const char *idTag, unsigned int connectorId) {
+std::shared_ptr<Transaction> beginTransaction(const char *idTag, unsigned int connectorId) {
     if (!context) {
         MO_DBG_ERR("OCPP uninitialized"); //need to call mocpp_initialize before
-        return false;
+        return nullptr;
     }
-
-    #if MO_ENABLE_V201
-    if (context->getVersion().major == 2) {
-        if (!idTag || strnlen(idTag, MO_IDTOKEN_LEN_MAX + 2) > MO_IDTOKEN_LEN_MAX) {
-            MO_DBG_ERR("idTag format violation. Expect c-style string with at most %u characters", MO_IDTOKEN_LEN_MAX);
-            return false;
-        }
-        TransactionService::Evse *evse = nullptr;
-        if (auto txService = context->getModel().getTransactionService()) {
-            evse = txService->getEvse(connectorId);
-        }
-        if (!evse) {
-            MO_DBG_ERR("could not find EVSE");
-            return false;
-        }
-        return evse->beginAuthorization(idTag, true);
-    }
-    #endif
-
     if (!idTag || strnlen(idTag, IDTAG_LEN_MAX + 2) > IDTAG_LEN_MAX) {
         MO_DBG_ERR("idTag format violation. Expect c-style string with at most %u characters", IDTAG_LEN_MAX);
-        return false;
+        return nullptr;
     }
     auto connector = context->getModel().getConnector(connectorId);
     if (!connector) {
         MO_DBG_ERR("could not find connector");
-        return false;
+        return nullptr;
     }
 
-    return connector->beginTransaction(idTag) != nullptr;
+    return connector->beginTransaction(idTag);
 }
 
-bool beginTransaction_authorized(const char *idTag, const char *parentIdTag, unsigned int connectorId) {
+std::shared_ptr<Transaction> beginTransaction_authorized(const char *idTag, const char *parentIdTag, unsigned int connectorId) {
     if (!context) {
         MO_DBG_ERR("OCPP uninitialized"); //need to call mocpp_initialize before
-        return false;
+        return nullptr;
     }
-
-    #if MO_ENABLE_V201
-    if (context->getVersion().major == 2) {
-        if (!idTag || strnlen(idTag, MO_IDTOKEN_LEN_MAX + 2) > MO_IDTOKEN_LEN_MAX) {
-            MO_DBG_ERR("idTag format violation. Expect c-style string with at most %u characters", MO_IDTOKEN_LEN_MAX);
-            return false;
-        }
-        TransactionService::Evse *evse = nullptr;
-        if (auto txService = context->getModel().getTransactionService()) {
-            evse = txService->getEvse(connectorId);
-        }
-        if (!evse) {
-            MO_DBG_ERR("could not find EVSE");
-            return false;
-        }
-        return evse->beginAuthorization(idTag, false);
-    }
-    #endif
-
     if (!idTag || strnlen(idTag, IDTAG_LEN_MAX + 2) > IDTAG_LEN_MAX ||
         (parentIdTag && strnlen(parentIdTag, IDTAG_LEN_MAX + 2) > IDTAG_LEN_MAX)) {
         MO_DBG_ERR("(parent)idTag format violation. Expect c-style string with at most %u characters", IDTAG_LEN_MAX);
-        return false;
+        return nullptr;
     }
     auto connector = context->getModel().getConnector(connectorId);
     if (!connector) {
         MO_DBG_ERR("could not find connector");
-        return false;
+        return nullptr;
     }
     
-    return connector->beginTransaction_authorized(idTag, parentIdTag) != nullptr;
+    return connector->beginTransaction_authorized(idTag, parentIdTag);
 }
 
 bool endTransaction(const char *idTag, const char *reason, unsigned int connectorId) {
@@ -502,25 +746,6 @@ bool endTransaction(const char *idTag, const char *reason, unsigned int connecto
         MO_DBG_ERR("OCPP uninitialized"); //need to call mocpp_initialize before
         return false;
     }
-
-    #if MO_ENABLE_V201
-    if (context->getVersion().major == 2) {
-        if (!idTag || strnlen(idTag, MO_IDTOKEN_LEN_MAX + 2) > MO_IDTOKEN_LEN_MAX) {
-            MO_DBG_ERR("idTag format violation. Expect c-style string with at most %u characters", MO_IDTOKEN_LEN_MAX);
-            return false;
-        }
-        TransactionService::Evse *evse = nullptr;
-        if (auto txService = context->getModel().getTransactionService()) {
-            evse = txService->getEvse(connectorId);
-        }
-        if (!evse) {
-            MO_DBG_ERR("could not find EVSE");
-            return false;
-        }
-        return evse->endAuthorization(idTag, true);
-    }
-    #endif
-
     bool res = false;
     if (isTransactionActive(connectorId) && getTransactionIdTag(connectorId)) {
         //end transaction now if either idTag is nullptr (i.e. force stop) or the idTag matches beginTransaction
@@ -543,7 +768,7 @@ bool endTransaction(const char *idTag, const char *reason, unsigned int connecto
                         MO_DBG_DEBUG("Authorize rejected (%s), continue transaction", idTag_capture.c_str());
                         auto connector = context->getModel().getConnector(connectorId);
                         if (connector) {
-                            connector->updateTxNotification(TxNotification_AuthorizationRejected);
+                            connector->updateTxNotification(TxNotification::AuthorizationRejected);
                         }
                         return;
                     }
@@ -558,7 +783,7 @@ bool endTransaction(const char *idTag, const char *reason, unsigned int connecto
                     MO_DBG_DEBUG("Authorization timeout (%s), continue transaction", idTag_capture.c_str());
                     auto connector = context->getModel().getConnector(connectorId);
                     if (connector) {
-                        connector->updateTxNotification(TxNotification_AuthorizationTimeout);
+                        connector->updateTxNotification(TxNotification::AuthorizationTimeout);
                     }
                 });
 
@@ -581,25 +806,6 @@ bool endTransaction_authorized(const char *idTag, const char *reason, unsigned i
         MO_DBG_ERR("OCPP uninitialized"); //need to call mocpp_initialize before
         return false;
     }
-
-    #if MO_ENABLE_V201
-    if (context->getVersion().major == 2) {
-        if (!idTag || strnlen(idTag, MO_IDTOKEN_LEN_MAX + 2) > MO_IDTOKEN_LEN_MAX) {
-            MO_DBG_ERR("idTag format violation. Expect c-style string with at most %u characters", MO_IDTOKEN_LEN_MAX);
-            return false;
-        }
-        TransactionService::Evse *evse = nullptr;
-        if (auto txService = context->getModel().getTransactionService()) {
-            evse = txService->getEvse(connectorId);
-        }
-        if (!evse) {
-            MO_DBG_ERR("could not find EVSE");
-            return false;
-        }
-        return evse->endAuthorization(idTag, false);
-    }
-    #endif
-
     auto connector = context->getModel().getConnector(connectorId);
     if (!connector) {
         MO_DBG_ERR("could not find connector");
@@ -704,12 +910,6 @@ std::shared_ptr<Transaction>& getTransaction(unsigned int connectorId) {
         MO_DBG_WARN("OCPP uninitialized");
         return mocpp_undefinedTx;
     }
-    #if MO_ENABLE_V201
-    if (context->getVersion().major == 2) {
-        MO_DBG_ERR("only supported in v16");
-        return mocpp_undefinedTx;
-    }
-    #endif
     auto connector = context->getModel().getConnector(connectorId);
     if (!connector) {
         MO_DBG_ERR("could not find connector");
@@ -717,30 +917,6 @@ std::shared_ptr<Transaction>& getTransaction(unsigned int connectorId) {
     }
     return connector->getTransaction();
 }
-
-#if MO_ENABLE_V201
-Ocpp201::Transaction *getTransactionV201(unsigned int evseId) {
-    if (!context) {
-        MO_DBG_ERR("OCPP uninitialized"); //need to call mocpp_initialize before
-        return nullptr;
-    }
-
-    if (context->getVersion().major != 2) {
-        MO_DBG_ERR("only supported in v201");
-        return nullptr;
-    }
-
-    TransactionService::Evse *evse = nullptr;
-    if (auto txService = context->getModel().getTransactionService()) {
-        evse = txService->getEvse(evseId);
-    }
-    if (!evse) {
-        MO_DBG_ERR("could not find EVSE");
-        return nullptr;
-    }
-    return evse->getTransaction();
-}
-#endif //MO_ENABLE_V201
 
 bool ocppPermitsCharge(unsigned int connectorId) {
     if (!context) {
@@ -933,7 +1109,7 @@ void setSmartChargingOutput(std::function<void(float,float,int)> chargingLimitOu
     auto& model = context->getModel();
     if (!model.getSmartChargingService() && chargingLimitOutput) {
         model.setSmartChargingService(std::unique_ptr<SmartChargingService>(
-            new SmartChargingService(*context, filesystem, MO_NUMCONNECTORS)));
+            new SmartChargingService(*context, filesystem, MONoOfConnectors)));
     }
 
     if (auto scService = context->getModel().getSmartChargingService()) {
@@ -1092,7 +1268,7 @@ void addMeterValueInput(std::unique_ptr<SampledValueSampler> valueInput, unsigne
     auto& model = context->getModel();
     if (!model.getMeteringService()) {
         model.setMeteringSerivce(std::unique_ptr<MeteringService>(
-            new MeteringService(*context, MO_NUMCONNECTORS, filesystem)));
+            new MeteringService(*context, MONoOfConnectors, filesystem)));
     }
     model.getMeteringService()->addMeterValueSampler(connectorId, std::move(valueInput));
 }
@@ -1109,7 +1285,6 @@ void setOccupiedInput(std::function<bool()> occupied, unsigned int connectorId) 
                 evse->setOccupiedInput(occupied);
             }
         }
-        return;
     }
 #endif
     auto connector = context->getModel().getConnector(connectorId);
@@ -1146,17 +1321,11 @@ void setStopTxReadyInput(std::function<bool()> stopTxReady, unsigned int connect
     connector->setStopTxReadyInput(stopTxReady);
 }
 
-void setTxNotificationOutput(std::function<void(MicroOcpp::Transaction*,TxNotification)> notificationOutput, unsigned int connectorId) {
+void setTxNotificationOutput(std::function<void(MicroOcpp::Transaction*,MicroOcpp::TxNotification)> notificationOutput, unsigned int connectorId) {
     if (!context) {
         MO_DBG_ERR("OCPP uninitialized"); //need to call mocpp_initialize before
         return;
     }
-    #if MO_ENABLE_V201
-    if (context->getVersion().major == 2) {
-        MO_DBG_ERR("only supported in v16");
-        return;
-    }
-    #endif
     auto connector = context->getModel().getConnector(connectorId);
     if (!connector) {
         MO_DBG_ERR("could not find connector");
@@ -1165,29 +1334,42 @@ void setTxNotificationOutput(std::function<void(MicroOcpp::Transaction*,TxNotifi
     connector->setTxNotificationOutput(notificationOutput);
 }
 
-#if MO_ENABLE_V201
-void setTxNotificationOutputV201(std::function<void(MicroOcpp::Ocpp201::Transaction*,TxNotification)> notificationOutput, unsigned int connectorId) {
+void setAvailability(bool available, unsigned int connectorId) {
     if (!context) {
         MO_DBG_ERR("OCPP uninitialized"); //need to call mocpp_initialize before
         return;
     }
 
-    if (context->getVersion().major != 2) {
-        MO_DBG_ERR("only supported in v201");
-        return;
-    }
+    auto & model = context->getModel();
 
-    TransactionService::Evse *evse = nullptr;
-    if (auto txService = context->getModel().getTransactionService()) {
-        evse = txService->getEvse(connectorId);
+    if (connectorId == 0) {
+        for (unsigned int cId = 0; cId < model.getNumConnectors(); cId++) {
+            auto connector = model.getConnector(cId);
+            connector->setAvailability(available);
+        }
+    } else {
+        auto connector = model.getConnector(connectorId);
+        connector->setAvailability(available);
     }
-    if (!evse) {
-        MO_DBG_ERR("could not find EVSE");
+}
+
+
+void setAvailabilityVolatile(bool available, unsigned int connectorId) {
+    if (!context) {
+        MO_DBG_ERR("OCPP uninitialized"); //need to call mocpp_initialize before
         return;
     }
-    evse->setTxNotificationOutput(notificationOutput);
+    auto & model = context->getModel();
+    if (connectorId == 0) {
+        for (unsigned int cId = 0; cId < model.getNumConnectors(); cId++) {
+            auto connector = model.getConnector(cId);
+            connector->setAvailabilityVolatile(available);
+        }
+    } else {
+        auto connector = model.getConnector(connectorId);
+        connector->setAvailabilityVolatile(available);
+    }
 }
-#endif //MO_ENABLE_V201
 
 #if MO_ENABLE_CONNECTOR_LOCK
 void setOnUnlockConnectorInOut(std::function<UnlockConnectorResult()> onUnlockConnectorInOut, unsigned int connectorId) {
@@ -1302,6 +1484,23 @@ DiagnosticsService *getDiagnosticsService() {
     return model.getDiagnosticsService();
 }
 
+void setOnDiagnosticsUpload(std::function<bool(const char *location, Timestamp &startTime, Timestamp &stopTime)> onUpload) {
+    getDiagnosticsService()->setOnUpload(onUpload);
+}
+
+void setOnUploadStatusInput(std::function<MicroOcpp::UploadStatus()> uploadStatusInput){
+    if (!context) {
+        MO_DBG_ERR("OCPP uninitialized"); //need to call mocpp_initialize before
+        return;
+    }
+
+    if (auto diagService = context->getModel().getDiagnosticsService()) {
+        diagService->setOnUploadStatusInput(uploadStatusInput);
+    } else {
+        MO_DBG_ERR("DiagnosticsService not initialized");
+    }
+}
+
 #if MO_ENABLE_CERT_MGMT
 
 void setCertificateStore(std::unique_ptr<MicroOcpp::CertificateStore> certStore) {
@@ -1349,6 +1548,19 @@ void setOnSendConf(const char *operationType, OnSendConfListener onSendConf) {
         return;
     }
     context->getOperationRegistry().setOnResponse(operationType, onSendConf);
+}
+
+void setOnReceiveConf(const char *operationType, OnReceiveConfListener onReceiveConf) {
+    if (!context) {
+        MO_DBG_ERR("OCPP uninitialized");
+        return;
+    }
+    if (!operationType) {
+        MO_DBG_ERR("invalid args");
+        return;
+    }
+    MO_DBG_DEBUG("API setOnReceiveConf called for %s", operationType);
+    context->getOperationRegistry().setOnReceiveConf(operationType, onReceiveConf);
 }
 
 void sendRequest(const char *operationType,

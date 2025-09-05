@@ -237,7 +237,9 @@ int FtpTransferMbedTLS::setup_tls() {
                                     (const unsigned char *) client_key,
                                     strlen(client_key),
                                     NULL,
-                                    0)) {
+                                    0,
+                                    mbedtls_ctr_drbg_random,
+                                    &ctr_drbg)) {
             MO_DBG_ERR("mbedtls_pk_parse_key: %i", ret);
             return ret;
         }
@@ -320,13 +322,22 @@ int FtpTransferMbedTLS::connect_data() {
 
     if (isSecure) {
         //reuse SSL session of ctrl conn
-
-        if (auto ret = mbedtls_ssl_set_session(&data_ssl, 
-                    mbedtls_ssl_get_session_pointer(&ctrl_ssl))) {
-            MO_DBG_ERR("session reuse failure: %i", ret);
+        mbedtls_ssl_session session;
+        mbedtls_ssl_session_init(&session);
+        
+        if (auto ret = mbedtls_ssl_get_session(&ctrl_ssl, &session)) {
+            MO_DBG_ERR("get session failure: %i", ret);
+            mbedtls_ssl_session_free(&session);
             return ret;
         }
-
+        
+        if (auto ret = mbedtls_ssl_set_session(&data_ssl, &session)) {
+            MO_DBG_ERR("session reuse failure: %i", ret);
+            mbedtls_ssl_session_free(&session);
+            return ret;
+        }
+        
+        mbedtls_ssl_session_free(&session);
         data_ssl_established = true;
     }
 

@@ -5,10 +5,7 @@
 #include "MicroOcpp_c.h"
 #include "MicroOcpp.h"
 
-#include <MicroOcpp/Version.h>
 #include <MicroOcpp/Model/Certificates/Certificate_c.h>
-#include <MicroOcpp/Core/Context.h>
-#include <MicroOcpp/Model/Model.h>
 #include <MicroOcpp/Core/Memory.h>
 
 #include <MicroOcpp/Platform.h>
@@ -16,14 +13,11 @@
 
 MicroOcpp::Connection *ocppSocket = nullptr;
 
-void ocpp_initialize(OCPP_Connection *conn, const char *chargePointModel, const char *chargePointVendor, struct OCPP_FilesystemOpt fsopt, bool autoRecover, bool ocpp201) {
-    ocpp_initialize_full(conn, ocpp201 ?
-                                    ChargerCredentials::v201(chargePointModel, chargePointVendor) :
-                                    ChargerCredentials(chargePointModel, chargePointVendor),
-                               fsopt, autoRecover, ocpp201);
+void ocpp_initialize(OCPP_Connection *conn, const char *chargePointModel, const char *chargePointVendor, struct OCPP_FilesystemOpt fsopt, bool autoRecover) {
+    ocpp_initialize_full(conn, ChargerCredentials(chargePointModel, chargePointVendor), fsopt, autoRecover);
 }
 
-void ocpp_initialize_full(OCPP_Connection *conn, const char *bootNotificationCredentials, struct OCPP_FilesystemOpt fsopt, bool autoRecover, bool ocpp201) {
+void ocpp_initialize_full(OCPP_Connection *conn, const char *bootNotificationCredentials, struct OCPP_FilesystemOpt fsopt, bool autoRecover) {
     if (!conn) {
         MO_DBG_ERR("conn is null");
     }
@@ -32,31 +26,11 @@ void ocpp_initialize_full(OCPP_Connection *conn, const char *bootNotificationCre
 
     MicroOcpp::FilesystemOpt adaptFsopt = fsopt;
 
-    mocpp_initialize(*ocppSocket, bootNotificationCredentials, MicroOcpp::makeDefaultFilesystemAdapter(adaptFsopt), autoRecover,
-            ocpp201 ?
-                MicroOcpp::ProtocolVersion(2,0,1) :
-                MicroOcpp::ProtocolVersion(1,6));
-}
-
-void ocpp_initialize_full2(OCPP_Connection *conn, const char *bootNotificationCredentials, FilesystemAdapterC *filesystem, bool autoRecover, bool ocpp201) {
-    if (!conn) {
-        MO_DBG_ERR("conn is null");
-    }
-
-    ocppSocket = reinterpret_cast<MicroOcpp::Connection*>(conn);
-
-    mocpp_initialize(*ocppSocket, bootNotificationCredentials, *reinterpret_cast<std::shared_ptr<MicroOcpp::FilesystemAdapter>*>(filesystem), autoRecover,
-            ocpp201 ?
-                MicroOcpp::ProtocolVersion(2,0,1) :
-                MicroOcpp::ProtocolVersion(1,6));
+    mocpp_initialize(*ocppSocket, bootNotificationCredentials, MicroOcpp::makeDefaultFilesystemAdapter(adaptFsopt), autoRecover, MicroOcpp::ProtocolVersion(1,6));
 }
 
 void ocpp_deinitialize() {
     mocpp_deinitialize();
-}
-
-bool ocpp_is_initialized() {
-    return getOcppContext() != nullptr;
 }
 
 void ocpp_loop() {
@@ -157,18 +131,18 @@ std::function<UnlockConnectorResult()> adaptFn(unsigned int connectorId, PollUnl
 }
 #endif //MO_ENABLE_CONNECTOR_LOCK
 
-bool ocpp_beginTransaction(const char *idTag) {
-    return beginTransaction(idTag);
+void ocpp_beginTransaction(const char *idTag) {
+    beginTransaction(idTag);
 }
-bool ocpp_beginTransaction_m(unsigned int connectorId, const char *idTag) {
-    return beginTransaction(idTag, connectorId);
+void ocpp_beginTransaction_m(unsigned int connectorId, const char *idTag) {
+    beginTransaction(idTag, connectorId);
 }
 
-bool ocpp_beginTransaction_authorized(const char *idTag, const char *parentIdTag) {
-    return beginTransaction_authorized(idTag, parentIdTag);
+void ocpp_beginTransaction_authorized(const char *idTag, const char *parentIdTag) {
+    beginTransaction_authorized(idTag, parentIdTag);
 }
-bool ocpp_beginTransaction_authorized_m(unsigned int connectorId, const char *idTag, const char *parentIdTag) {
-    return beginTransaction_authorized(idTag, parentIdTag, connectorId);
+void ocpp_beginTransaction_authorized_m(unsigned int connectorId, const char *idTag, const char *parentIdTag) {
+    beginTransaction_authorized(idTag, parentIdTag, connectorId);
 }
 
 bool ocpp_endTransaction(const char *idTag, const char *reason) {
@@ -210,29 +184,10 @@ OCPP_Transaction *ocpp_getTransaction() {
     return ocpp_getTransaction_m(1);
 }
 OCPP_Transaction *ocpp_getTransaction_m(unsigned int connectorId) {
-    #if MO_ENABLE_V201
-    {
-        if (!getOcppContext()) {
-            MO_DBG_ERR("OCPP uninitialized"); //need to call mocpp_initialize before
-            return nullptr;
-        }
-        if (getOcppContext()->getModel().getVersion().major == 2) {
-            ocpp_tx_compat_setV201(true); //set the ocpp_tx C-API into v201 mode globally
-            if (getTransactionV201(connectorId)) {
-                return reinterpret_cast<OCPP_Transaction*>(getTransactionV201(connectorId));
-            } else {
-                return nullptr;
-            }
-        } else {
-            ocpp_tx_compat_setV201(false); //set the ocpp_tx C-API into v16 mode globally
-            //continue with V16 implementation
-        }
-    }
-    #endif //MO_ENABLE_V201
     if (getTransaction(connectorId)) {
         return reinterpret_cast<OCPP_Transaction*>(getTransaction(connectorId).get());
     } else {
-        return nullptr;
+        return NULL;
     }
 }
 
@@ -319,33 +274,6 @@ void ocpp_addMeterValueInputFloat_m(unsigned int connectorId, InputFloat_m value
     addMeterValueInput(adaptFn(connectorId, valueInput), measurand, unit, location, phase, connectorId);
 }
 
-void ocpp_addMeterValueInputIntTx(int (*valueInput)(ReadingContext), const char *measurand, const char *unit, const char *location, const char *phase) {
-    MicroOcpp::SampledValueProperties props;
-    props.setMeasurand(measurand);
-    props.setUnit(unit);
-    props.setLocation(location);
-    props.setPhase(phase);
-    auto mvs = std::unique_ptr<MicroOcpp::SampledValueSamplerConcrete<int32_t, MicroOcpp::SampledValueDeSerializer<int32_t>>>(
-                           new MicroOcpp::SampledValueSamplerConcrete<int32_t, MicroOcpp::SampledValueDeSerializer<int32_t>>(
-            props,
-            [valueInput] (ReadingContext readingContext) {return valueInput(readingContext);}
-    ));
-    addMeterValueInput(std::move(mvs));
-}
-void ocpp_addMeterValueInputIntTx_m(unsigned int connectorId, int (*valueInput)(unsigned int cId, ReadingContext), const char *measurand, const char *unit, const char *location, const char *phase) {
-    MicroOcpp::SampledValueProperties props;
-    props.setMeasurand(measurand);
-    props.setUnit(unit);
-    props.setLocation(location);
-    props.setPhase(phase);
-    auto mvs = std::unique_ptr<MicroOcpp::SampledValueSamplerConcrete<int32_t, MicroOcpp::SampledValueDeSerializer<int32_t>>>(
-                           new MicroOcpp::SampledValueSamplerConcrete<int32_t, MicroOcpp::SampledValueDeSerializer<int32_t>>(
-            props,
-            [valueInput, connectorId] (ReadingContext readingContext) {return valueInput(connectorId, readingContext);}
-    ));
-    addMeterValueInput(std::move(mvs), connectorId);
-}
-
 void ocpp_addMeterValueInput(MeterValueInput *meterValueInput) {
     ocpp_addMeterValueInput_m(1, meterValueInput);
 }
@@ -380,14 +308,14 @@ void ocpp_setStopTxReadyInput_m(unsigned int connectorId, InputBool_m stopTxRead
     setStopTxReadyInput(adaptFn(connectorId, stopTxReady), connectorId);
 }
 
-void ocpp_setTxNotificationOutput(void (*notificationOutput)(OCPP_Transaction*, TxNotification)) {
-    setTxNotificationOutput([notificationOutput] (MicroOcpp::Transaction *tx, TxNotification notification) {
-        notificationOutput(reinterpret_cast<OCPP_Transaction*>(tx), notification);
+void ocpp_setTxNotificationOutput(void (*notificationOutput)(OCPP_Transaction*, enum OCPP_TxNotification)) {
+    setTxNotificationOutput([notificationOutput] (MicroOcpp::Transaction *tx, MicroOcpp::TxNotification notification) {
+        notificationOutput(reinterpret_cast<OCPP_Transaction*>(tx), convertTxNotification(notification));
     });
 }
-void ocpp_setTxNotificationOutput_m(unsigned int connectorId, void (*notificationOutput)(unsigned int, OCPP_Transaction*, TxNotification)) {
-    setTxNotificationOutput([notificationOutput, connectorId] (MicroOcpp::Transaction *tx, TxNotification notification) {
-        notificationOutput(connectorId, reinterpret_cast<OCPP_Transaction*>(tx), notification);
+void ocpp_setTxNotificationOutput_m(unsigned int connectorId, void (*notificationOutput)(unsigned int, OCPP_Transaction*, enum OCPP_TxNotification)) {
+    setTxNotificationOutput([notificationOutput, connectorId] (MicroOcpp::Transaction *tx, MicroOcpp::TxNotification notification) {
+        notificationOutput(connectorId, reinterpret_cast<OCPP_Transaction*>(tx), convertTxNotification(notification));
     }, connectorId);
 }
 
@@ -428,6 +356,10 @@ void ocpp_setOnReceiveRequest(const char *operationType, OnMessage onRequest) {
 
 void ocpp_setOnSendConf(const char *operationType, OnMessage onConfirmation) {
     setOnSendConf(operationType, adaptFn(onConfirmation));
+}
+
+void ocpp_set_console_out_c(void (*console_out)(const char *msg)) {
+    mocpp_set_console_out(console_out);
 }
 
 void ocpp_authorize(const char *idTag, AuthorizeConfCallback onConfirmation, AuthorizeAbortCallback onAbort, AuthorizeTimeoutCallback onTimeout, AuthorizeErrorCallback onError, void *user_data) {

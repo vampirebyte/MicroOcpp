@@ -16,8 +16,6 @@
 #include <catch2/catch.hpp>
 #include "./helpers/testHelper.h"
 
-#include <array>
-
 #define BASE_TIME "2023-01-01T00:00:00.000Z"
 
 using namespace MicroOcpp;
@@ -375,8 +373,8 @@ TEST_CASE( "Charging sessions" ) {
 
         // now, tx journal is full. Block any further charging session
 
-        auto tx_success = beginTransaction_authorized("mIdTag");
-        REQUIRE( !tx_success );
+        auto tx = beginTransaction_authorized("mIdTag");
+        REQUIRE( !tx );
 
         loop();
 
@@ -451,8 +449,8 @@ TEST_CASE( "Charging sessions" ) {
 
         // now, tx journal is full. Block any further charging session
 
-        auto tx_success = beginTransaction_authorized("mIdTag");
-        REQUIRE( tx_success );
+        auto tx = beginTransaction_authorized("mIdTag");
+        REQUIRE( tx );
 
         loop();
 

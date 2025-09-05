@@ -23,7 +23,6 @@ set(MO_SRC
     src/MicroOcpp/Core/Request.cpp
     src/MicroOcpp/Core/Connection.cpp
     src/MicroOcpp/Core/Time.cpp
-    src/MicroOcpp/Core/UuidUtils.cpp
     src/MicroOcpp/Operations/Authorize.cpp
     src/MicroOcpp/Operations/BootNotification.cpp
     src/MicroOcpp/Operations/CancelReservation.cpp
@@ -79,6 +78,7 @@ set(MO_SRC
     src/MicroOcpp/Model/Certificates/CertificateService.cpp
     src/MicroOcpp/Model/ConnectorBase/ConnectorsCommon.cpp
     src/MicroOcpp/Model/ConnectorBase/Connector.cpp
+    src/MicroOcpp/Model/ConnectorBase/Notification.cpp
     src/MicroOcpp/Model/Diagnostics/DiagnosticsService.cpp
     src/MicroOcpp/Model/FirmwareManagement/FirmwareService.cpp
     src/MicroOcpp/Model/Heartbeat/HeartbeatService.cpp

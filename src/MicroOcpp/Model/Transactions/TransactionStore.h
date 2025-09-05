@@ -35,7 +35,7 @@ public:
 
     std::shared_ptr<Transaction> getTransaction(unsigned int txNr);
     std::shared_ptr<Transaction> createTransaction(unsigned int txNr, bool silent = false);
-
+    std::shared_ptr<Transaction> getActiveTransaction();
     bool remove(unsigned int txNr);
 };
 
@@ -49,6 +49,8 @@ public:
 
     std::shared_ptr<Transaction> getTransaction(unsigned int connectorId, unsigned int txNr);
     std::shared_ptr<Transaction> createTransaction(unsigned int connectorId, unsigned int txNr, bool silent = false);
+
+    std::shared_ptr<Transaction> getActiveTransaction(unsigned int connectorId);
 
     bool remove(unsigned int connectorId, unsigned int txNr);
 };

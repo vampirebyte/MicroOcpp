@@ -28,7 +28,6 @@ MeteringConnector::MeteringConnector(Context& context, int connectorId, MeterSto
     auto meterValuesSampledDataString = declareConfiguration<const char*>("MeterValuesSampledData", "");
     declareConfiguration<int>("MeterValuesSampledDataMaxLength", 8, CONFIGURATION_VOLATILE, true);
     meterValueSampleIntervalInt = declareConfiguration<int>("MeterValueSampleInterval", 60);
-    registerConfigurationValidator("MeterValueSampleInterval", VALIDATE_UNSIGNED_INT);
 
     auto stopTxnSampledDataString = declareConfiguration<const char*>("StopTxnSampledData", "");
     declareConfiguration<int>("StopTxnSampledDataMaxLength", 8, CONFIGURATION_VOLATILE, true);
@@ -36,7 +35,6 @@ MeteringConnector::MeteringConnector(Context& context, int connectorId, MeterSto
     auto meterValuesAlignedDataString = declareConfiguration<const char*>("MeterValuesAlignedData", "");
     declareConfiguration<int>("MeterValuesAlignedDataMaxLength", 8, CONFIGURATION_VOLATILE, true);
     clockAlignedDataIntervalInt  = declareConfiguration<int>("ClockAlignedDataInterval", 0);
-    registerConfigurationValidator("ClockAlignedDataInterval", VALIDATE_UNSIGNED_INT);
 
     auto stopTxnAlignedDataString = declareConfiguration<const char*>("StopTxnAlignedData", "");
 
@@ -92,7 +90,7 @@ void MeteringConnector::loop() {
 
         auto& timestampNow = model.getClock().now();
         auto dt = nextAlignedTime - timestampNow;
-        if (dt < 0 ||                              //normal case: interval elapsed
+        if (dt <= 0 ||                              //normal case: interval elapsed
                 dt > clockAlignedDataIntervalInt->getInt()) {   //special case: clock has been adjusted or first run
 
             MO_DBG_DEBUG("Clock aligned measurement %ds: %s", dt,
@@ -183,6 +181,7 @@ void MeteringConnector::addMeterValueSampler(std::unique_ptr<SampledValueSampler
     if (!strcmp(meterValueSampler->getProperties().getMeasurand(), "Energy.Active.Import.Register")) {
         energySamplerIndex = samplers.size();
     }
+    MO_DBG_INFO("Added MeterValueSampler for connector %d, measurand: %s, index: %d", connectorId, meterValueSampler->getProperties().getMeasurand(), (int) samplers.size());
     samplers.push_back(std::move(meterValueSampler));
 }
 

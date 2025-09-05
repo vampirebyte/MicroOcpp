@@ -204,7 +204,12 @@ Vector<ConfigurationContainer*> getConfigurationContainersPublic() {
     return res;
 }
 
+bool configuration_inited = false;
+
 bool configuration_init(std::shared_ptr<FilesystemAdapter> _filesystem) {
+    if (configuration_inited)
+        return true; //configuration_init() already called; tolerate multiple calls so user can use this store for
+                     //credentials outside ArduinoOcpp which need to be loaded before OCPP_initialize()
     filesystem = _filesystem;
     return true;
 }
@@ -244,15 +249,6 @@ bool configuration_clean_unused() {
         container->removeUnused();
     }
     return configuration_save();
-}
-
-bool VALIDATE_UNSIGNED_INT(const char *value) {
-    for(size_t i = 0; value[i] != '\0'; i++) {
-        if (value[i] < '0' || value[i] > '9') {
-            return false;
-        }
-    }
-    return true;
 }
 
 } //end namespace MicroOcpp

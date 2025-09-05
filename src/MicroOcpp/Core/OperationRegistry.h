@@ -20,6 +20,7 @@ struct OperationCreator {
     std::function<Operation*()> creator {nullptr};
     OnReceiveReqListener onRequest {nullptr};
     OnSendConfListener onResponse {nullptr};
+    OnReceiveConfListener onReceiveConf {nullptr};
 };
 
 class OperationRegistry {
@@ -33,6 +34,7 @@ public:
     void registerOperation(const char *operationType, std::function<Operation*()> creator);
     void setOnRequest(const char *operationType, OnReceiveReqListener onRequest);
     void setOnResponse(const char *operationType, OnSendConfListener onResponse);
+    void setOnReceiveConf(const char *operationType, OnReceiveConfListener onReceiveConf);
     
     std::unique_ptr<Request> deserializeOperation(const char *operationType);
 

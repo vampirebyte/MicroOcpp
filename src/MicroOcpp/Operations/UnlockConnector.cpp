@@ -38,7 +38,7 @@ void UnlockConnector::processReq(JsonObject payload) {
         }
 
         connector->endTransaction(nullptr, "UnlockCommand");
-        connector->updateTxNotification(TxNotification_RemoteStop);
+        connector->updateTxNotification(TxNotification::RemoteStop);
 
         cbUnlockResult = unlockConnector();
 

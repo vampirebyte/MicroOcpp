@@ -7,7 +7,7 @@
 #       Use this file as a starting point for writing your own SCons integration. And as always, any
 #       contributions are highly welcome!
 
-Import("env")
+Import("env", "ARDUINOJSON_DIR")
 
 import os, pathlib
 
@@ -17,15 +17,16 @@ def getAllDirs(root_dir):
         dir_list.append(Dir(root))
     return dir_list
 
-SOURCE_DIR = Dir(".").srcnode().Dir("src")
+SOURCE_DIR = Dir(".").srcnode()
 
-source_dirs = getAllDirs(SOURCE_DIR)
+source_dirs = getAllDirs(SOURCE_DIR.Dir("src"))
+source_dirs += getAllDirs(ARDUINOJSON_DIR.Dir("src"))
 
 source_files = []
 
 for folder in source_dirs:
-    source_files += folder.glob("*.c")
     source_files += folder.glob("*.cpp")
+    env["CPPPATH"].append(folder)
 
 compiled_objects = []
 for source_file in source_files:
@@ -43,7 +44,7 @@ libmicroocpp = env.StaticLibrary(
 
 exports = {
     'library': libmicroocpp,
-    'CPPPATH': SOURCE_DIR
+    'CPPPATH': source_dirs.copy()
 }
 
 Return("exports")

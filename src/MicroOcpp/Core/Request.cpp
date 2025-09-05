@@ -6,7 +6,6 @@
 #include <MicroOcpp/Core/Operation.h>
 #include <MicroOcpp/Core/Connection.h>
 #include <MicroOcpp/Model/Transactions/Transaction.h>
-#include <MicroOcpp/Core/UuidUtils.h>
 
 #include <MicroOcpp/Operations/StartTransaction.h>
 #include <MicroOcpp/Operations/StopTransaction.h>
@@ -69,9 +68,16 @@ void Request::setMessageID(const char *id){
 Request::CreateRequestResult Request::createRequest(JsonDoc& requestJson) {
 
     if (messageID.empty()) {
-        char uuid [37] = {'\0'};
-        generateUUID(uuid, 37);
-        messageID = uuid;
+        unsigned char random [18];
+        char guuid [sizeof(random) * 2 + 1];
+
+        writeRandomNonsecure(random, sizeof(random));
+
+        for (size_t i = 0; i < sizeof(random); i++) {
+            snprintf(guuid + i * 2, 3, "%02x", random[i]);
+        }
+        guuid[8] = guuid[13] = guuid[18] = guuid[23] = '-';
+        messageID = guuid;
     }
 
     /*
@@ -135,7 +141,10 @@ bool Request::receiveResponse(JsonArray response){
         /*
         * Hand the payload over to the onReceiveConf Callback
         */
-        onReceiveConfListener(payload);
+        if (onReceiveConfListener) {
+            MO_DBG_DEBUG("invoking onReceiveConfListener for %s", operation->getOperationType());
+            onReceiveConfListener(payload);
+        }
 
         /*
         * return true as this message has been consumed

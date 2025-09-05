@@ -49,9 +49,7 @@ Connector::Connector(Context& context, std::shared_ptr<FilesystemAdapter> filesy
 #endif //MO_ENABLE_CONNECTOR_LOCK
 
     connectionTimeOutInt = declareConfiguration<int>("ConnectionTimeOut", 30);
-    registerConfigurationValidator("ConnectionTimeOut", VALIDATE_UNSIGNED_INT);
     minimumStatusDurationInt = declareConfiguration<int>("MinimumStatusDuration", 0);
-    registerConfigurationValidator("MinimumStatusDuration", VALIDATE_UNSIGNED_INT);
     stopTransactionOnInvalidIdBool = declareConfiguration<bool>("StopTransactionOnInvalidId", true);
     stopTransactionOnEVSideDisconnectBool = declareConfiguration<bool>("StopTransactionOnEVSideDisconnect", true);
     localPreAuthorizeBool = declareConfiguration<bool>("LocalPreAuthorize", false);
@@ -63,7 +61,6 @@ Connector::Connector(Context& context, std::shared_ptr<FilesystemAdapter> filesy
 
     //how long the EVSE tries the Authorize request before it enters offline mode
     authorizationTimeoutInt = MicroOcpp::declareConfiguration<int>(MO_CONFIG_EXT_PREFIX "AuthorizationTimeout", 20);
-    registerConfigurationValidator(MO_CONFIG_EXT_PREFIX "AuthorizationTimeout", VALIDATE_UNSIGNED_INT);
 
     //FreeVend mode
     freeVendActiveBool = declareConfiguration<bool>(MO_CONFIG_EXT_PREFIX "FreeVendActive", false);
@@ -72,9 +69,7 @@ Connector::Connector(Context& context, std::shared_ptr<FilesystemAdapter> filesy
     txStartOnPowerPathClosedBool = declareConfiguration<bool>(MO_CONFIG_EXT_PREFIX "TxStartOnPowerPathClosed", false);
 
     transactionMessageAttemptsInt = declareConfiguration<int>("TransactionMessageAttempts", 3);
-    registerConfigurationValidator("TransactionMessageAttempts", VALIDATE_UNSIGNED_INT);
     transactionMessageRetryIntervalInt = declareConfiguration<int>("TransactionMessageRetryInterval", 60);
-    registerConfigurationValidator("TransactionMessageRetryInterval", VALIDATE_UNSIGNED_INT);
 
     if (!availabilityBool) {
         MO_DBG_ERR("Cannot declare availabilityBool");
@@ -310,13 +305,13 @@ void Connector::loop() {
                     transaction->getBeginTimestamp() > MIN_TIME &&
                     connectionTimeOutInt && connectionTimeOutInt->getInt() > 0 &&
                     !connectorPluggedInput() &&
-                    model.getClock().now() - transaction->getBeginTimestamp() > connectionTimeOutInt->getInt()) {
+                    model.getClock().now() - transaction->getBeginTimestamp() >= connectionTimeOutInt->getInt()) {
 
                 MO_DBG_INFO("Session mngt: timeout");
                 transaction->setInactive();
                 transaction->commit();
 
-                updateTxNotification(TxNotification_ConnectionTimeout);
+                updateTxNotification(TxNotification::ConnectionTimeout);
             }
         }
 
@@ -377,7 +372,7 @@ void Connector::loop() {
 
                 transaction->commit();
 
-                updateTxNotification(TxNotification_StartTx);
+                updateTxNotification(TxNotification::StartTx);
 
                 //fetchFrontRequest will create the StartTransaction and pass it to the message sender
                 return;
@@ -421,7 +416,7 @@ void Connector::loop() {
 
                 transaction->commit();
 
-                updateTxNotification(TxNotification_StopTx);
+                updateTxNotification(TxNotification::StopTx);
 
                 //fetchFrontRequest will create the StopTransaction and pass it to the message sender
                 return;
@@ -741,7 +736,7 @@ std::shared_ptr<Transaction> Connector::beginTransaction(const char *idTag) {
             if (parentIdTag) {
                 //parentIdTag known
                 MO_DBG_INFO("connector %u reserved - abort transaction", connectorId);
-                updateTxNotification(TxNotification_ReservationConflict);
+                updateTxNotification(TxNotification::ReservationConflict);
                 return nullptr;
             } else {
                 //parentIdTag unkown but local authorization failed in any case
@@ -781,7 +776,7 @@ std::shared_ptr<Transaction> Connector::beginTransaction(const char *idTag) {
         }
         transaction->setAuthorized();
 
-        updateTxNotification(TxNotification_Authorized);
+        updateTxNotification(TxNotification::Authorized);
     }
 
     transaction->commit();
@@ -803,7 +798,7 @@ std::shared_ptr<Transaction> Connector::beginTransaction(const char *idTag) {
             MO_DBG_DEBUG("Authorize rejected (%s), abort tx process", tx->getIdTag());
             tx->setIdTagDeauthorized();
             tx->commit();
-            updateTxNotification(TxNotification_AuthorizationRejected);
+            updateTxNotification(TxNotification::AuthorizationRejected);
             return;
         }
 
@@ -825,7 +820,7 @@ std::shared_ptr<Transaction> Connector::beginTransaction(const char *idTag) {
                     MO_DBG_INFO("connector %u reserved - abort transaction", connectorId);
                     tx->setInactive();
                     tx->commit();
-                    updateTxNotification(TxNotification_ReservationConflict);
+                    updateTxNotification(TxNotification::ReservationConflict);
                     return;
                 }
             }
@@ -840,7 +835,7 @@ std::shared_ptr<Transaction> Connector::beginTransaction(const char *idTag) {
         tx->setAuthorized();
         tx->commit();
 
-        updateTxNotification(TxNotification_Authorized);
+        updateTxNotification(TxNotification::Authorized);
     });
 
     //capture local auth and reservation check in for timeout handler
@@ -855,7 +850,7 @@ std::shared_ptr<Transaction> Connector::beginTransaction(const char *idTag) {
             MO_DBG_DEBUG("Abort transaction process (%s), timeout, expired local auth", tx->getIdTag());
             tx->setInactive();
             tx->commit();
-            updateTxNotification(TxNotification_AuthorizationTimeout);
+            updateTxNotification(TxNotification::AuthorizationTimeout);
             return;
         }
 
@@ -864,7 +859,7 @@ std::shared_ptr<Transaction> Connector::beginTransaction(const char *idTag) {
             MO_DBG_INFO("connector %u reserved (offline) - abort transaction", connectorId);
             tx->setInactive();
             tx->commit();
-            updateTxNotification(TxNotification_ReservationConflict);
+            updateTxNotification(TxNotification::ReservationConflict);
             return;
         }
 
@@ -876,7 +871,7 @@ std::shared_ptr<Transaction> Connector::beginTransaction(const char *idTag) {
             tx->setAuthorized();
             tx->commit();
 
-            updateTxNotification(TxNotification_Authorized);
+            updateTxNotification(TxNotification::Authorized);
             return;
         }
 
@@ -887,14 +882,14 @@ std::shared_ptr<Transaction> Connector::beginTransaction(const char *idTag) {
             }
             tx->setAuthorized();
             tx->commit();
-            updateTxNotification(TxNotification_Authorized);
+            updateTxNotification(TxNotification::Authorized);
             return;
         }
 
         MO_DBG_DEBUG("Abort transaction process (%s): timeout", tx->getIdTag());
         tx->setInactive();
         tx->commit();
-        updateTxNotification(TxNotification_AuthorizationTimeout);
+        updateTxNotification(TxNotification::AuthorizationTimeout);
         return; //offline tx disabled
     });
     context.initiateRequest(std::move(authorize));
@@ -1189,7 +1184,7 @@ std::unique_ptr<Request> Connector::fetchFrontRequest() {
 
                 const char* idTagInfoStatus = response["idTagInfo"]["status"] | "_Undefined";
                 if (strcmp(idTagInfoStatus, "Accepted")) {
-                    updateTxNotification(TxNotification_DeAuthorized);
+                    updateTxNotification(TxNotification::DeAuthorized);
                 }
             });
             auto transactionFront_capture = transactionFront;

@@ -255,13 +255,6 @@ int Timestamp::operator-(const Timestamp &rhs) const {
     }
 
     int dt = (lhsDays - rhsDays) * (24 * 3600) + (hour - rhs.hour) * 3600 + (minute - rhs.minute) * 60 + second - rhs.second;
-
-#if MO_ENABLE_TIMESTAMP_MILLISECONDS
-    // Make it so that we round the difference to the nearest second, instead of being up to almost a whole second off
-    if ((ms - rhs.ms) > 500) dt++;
-    if ((ms - rhs.ms) < -500) dt--;
-#endif //MO_ENABLE_TIMESTAMP_MILLISECONDS
-
     return dt;
 }
 
@@ -351,6 +344,8 @@ bool Clock::setTime(const char* jsonDateString) {
 
     currentTime = mocpp_basetime;
     lastUpdate = system_basetime;
+
+    timeIsSet = true;
 
     return true;
 }
